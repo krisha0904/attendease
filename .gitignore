@@ -1,0 +1,22 @@
+# Secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
+
+# Flutter/Dart
+frontend/.dart_tool/
+frontend/build/
+frontend/.metadata
+frontend/pubspec.lock

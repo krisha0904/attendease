@@ -79,6 +79,28 @@ class ApiService {
     }
   }
 
+  Future<bool> registerFaceOnly({
+    required int userId,
+    required String faceImageBase64,
+  }) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/register-face-only"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_id": userId,
+          "lat": 0.0,
+          "lng": 0.0,
+          "face_image_base64": faceImageBase64,
+        }),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      print("Error during face registration: $e");
+      return false;
+    }
+  }
+
   Future<bool> punchIn({
     required int userId,
     required double lat,

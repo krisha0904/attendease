@@ -7,7 +7,15 @@ import '../services/api_service.dart';
 
 class FaceRegistrationScreen extends StatefulWidget {
   final String phone;
-  const FaceRegistrationScreen({super.key, required this.phone});
+  final int userId;
+  final String userName;
+
+  const FaceRegistrationScreen({
+    super.key, 
+    required this.phone, 
+    required this.userId, 
+    required this.userName
+  });
 
   @override
   State<FaceRegistrationScreen> createState() => _FaceRegistrationScreenState();
@@ -18,12 +26,6 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
   List<CameraDescription>? _cameras;
   bool _isCameraReady = false;
   bool _isProcessing = false;
-  
-  final _facultyIdController = TextEditingController();
-  final _nameController = TextEditingController();
-  final _emailController = TextEditingController();
-  String _selectedRole = "teacher";
-  int _departmentId = 1;
 
   @override
   void initState() {
@@ -51,53 +53,47 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
     }
   }
 
-  Future<void> _submitRegistration() async {
-    if (_facultyIdController.text.isEmpty || _nameController.text.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Please fill all user info details")),
-      );
-      return;
-    }
-
-    if (_controller == null || !_controller!.value.isInitialized) return;
+  Future<void> _submitFaceRegistration() async {
+    if (_controller == null || !_controller!.value.isInitialized || _isProcessing) return;
 
     setState(() => _isProcessing = true);
 
     try {
-      // Capture setup photo for profile embedding
+      // Capture live setup photo for mapping to pre-registered profile
       XFile image = await _controller!.takePicture();
       final bytes = await File(image.path).readAsBytes();
       String base64Image = base64Encode(bytes);
 
-      bool success = await ApiService().register(
-        facultyId: _facultyIdController.text,
-        name: _nameController.text,
-        email: _emailController.text,
-        phone: widget.phone,
-        role: _selectedRole,
-        departmentId: _departmentId,
+      bool success = await ApiService().registerFaceOnly(
+        userId: widget.userId,
         faceImageBase64: base64Image,
       );
 
       if (success) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Faculty Face Profile Registered successfully!")),
+            const SnackBar(
+              content: Text("Face Biometric Profile paired successfully!"),
+              backgroundColor: Colors.green,
+            ),
           );
           Navigator.pushReplacement(
             context,
-            MaterialPageRoute(builder: (context) => DashboardScreen()),
+            MaterialPageRoute(builder: (context) => const DashboardScreen()),
           );
         }
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Registration failed. Please check inputs.")),
+            const SnackBar(
+              content: Text("Face registration failed. Please try again in bright lighting."),
+              backgroundColor: Colors.red,
+            ),
           );
         }
       }
     } catch (e) {
-      print("Error during registration: $e");
+      print("Error during face registration: $e");
     } finally {
       if (mounted) setState(() => _isProcessing = false);
     }
@@ -112,62 +108,68 @@ class _FaceRegistrationScreenState extends State<FaceRegistrationScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Face Profile Setup")),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(20),
+      backgroundColor: Colors.white,
+      appBar: AppBar(
+        title: const Text("First-Time Biometric Setup", style: TextStyle(fontWeight: FontWeight.bold)),
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black,
+        elevation: 0,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(24.0),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            if (_isCameraReady)
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: SizedBox(
-                  width: double.infinity,
-                  height: 220,
-                  child: CameraPreview(_controller!),
-                ),
-              )
-            else
-              const SizedBox(
-                height: 220,
-                child: Center(child: CircularProgressIndicator()),
+            const SizedBox(height: 10),
+            Text(
+              "Welcome, ${widget.userName}!",
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color: Colors.blue),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "Your account is verified. Please look at the camera to lock in your official biometric signature.",
+              style: TextStyle(fontSize: 14, color: Colors.grey[600]),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 30),
+            Expanded(
+              child: Center(
+                child: _isCameraReady
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.circular(150),
+                        child: Container(
+                          width: 280,
+                          height: 280,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.blue, width: 3),
+                          ),
+                          child: AspectRatio(
+                            aspectRatio: 1,
+                            child: CameraPreview(_controller!),
+                          ),
+                        ),
+                      )
+                    : const CircularProgressIndicator(),
               ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: _facultyIdController,
-              decoration: const InputDecoration(labelText: "Faculty/Staff ID", border: OutlineInputBorder()),
             ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _nameController,
-              decoration: const InputDecoration(labelText: "Full Name", border: OutlineInputBorder()),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _emailController,
-              decoration: const InputDecoration(labelText: "Email Address", border: OutlineInputBorder()),
-            ),
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              value: _selectedRole,
-              decoration: const InputDecoration(labelText: "Role", border: OutlineInputBorder()),
-              items: ['teacher', 'staff', 'hod']
-                  .map((role) => DropdownMenuItem(value: role, child: Text(role.toUpperCase())))
-                  .toList(),
-              onChanged: (val) => setState(() => _selectedRole = val!),
-            ),
-            const SizedBox(height: 25),
-            ElevatedButton(
-              onPressed: _isProcessing ? null : _submitRegistration,
+            const SizedBox(height: 40),
+            ElevatedButton.icon(
+              onPressed: _isProcessing ? null : _submitFaceRegistration,
+              icon: const Icon(Icons.face, size: 24),
+              label: _isProcessing 
+                  ? const CircularProgressIndicator(color: Colors.white)
+                  : const Text("CAPTURE & INITIALIZE FACE ID", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
               style: ElevatedButton.styleFrom(
-                minimumSize: const Size(double.infinity, 55),
+                minimumSize: const Size(double.infinity, 58),
                 backgroundColor: Colors.blue,
                 foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                elevation: 2,
               ),
-              child: _isProcessing 
-                  ? const CircularProgressIndicator(color: Colors.white)
-                  : const Text("REGISTER FACE PROFILE", style: TextStyle(fontWeight: FontWeight.bold)),
             ),
+            const SizedBox(height: 20),
           ],
         ),
       ),

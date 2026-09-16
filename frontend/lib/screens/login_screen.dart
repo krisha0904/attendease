@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'dashboard_screen.dart';
 import 'face_registration_screen.dart';
 import '../services/api_service.dart';
@@ -15,11 +14,9 @@ class _LoginScreenState extends State<LoginScreen> {
   final _phoneController = TextEditingController();
   final _otpController = TextEditingController();
   final _apiService = ApiService();
-  final _auth = FirebaseAuth.instance;
 
   bool _isOtpSent = false;
   bool _isLoading = false;
-  String _verificationId = "";
   String _selectedMethod = "sms";
   
   // Flag to represent new user flow or existing user flow for the presentation
@@ -44,60 +41,19 @@ class _LoginScreenState extends State<LoginScreen> {
         _isNewUser = true;
       }
 
-      if (_selectedMethod == "whatsapp") {
-        // Option to trigger the WhatsApp route via backend
-        final otpResult = await _apiService.sendOtp(_phoneController.text, method: "whatsapp");
-        setState(() {
-          _isLoading = false;
-          _isOtpSent = true;
-          _verificationId = "WHATSAPP_ROUTING";
-        });
-        String liveOtp = otpResult["otp"] ?? "";
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("OTP dispatched to your real WhatsApp number!")),
-        );
-        return;
-      }
+      // 2. Trigger custom backend API to send real OTP via Twilio (SMS or WhatsApp)
+      final otpResult = await _apiService.sendOtp(_phoneController.text, method: _selectedMethod);
+      
+      setState(() {
+        _isLoading = false;
+        _isOtpSent = true;
+      });
 
-      // 2. Format phone number to international standard (+91 for India)
-      String formattedPhone = _phoneController.text.startsWith("+") 
-          ? _phoneController.text 
-          : "+91${_phoneController.text}";
-
-      // 3. Trigger Firebase Phone Verification Engine to send real SMS directly to the phone
-      await _auth.verifyPhoneNumber(
-        phoneNumber: formattedPhone,
-        verificationCompleted: (PhoneAuthCredential credential) async {
-          // Automatic handling if instant SMS resolution occurs on device
-          await _auth.signInWithCredential(credential);
-          setState(() => _isLoading = false);
-          _navigateToNextScreen();
-        },
-        verificationFailed: (FirebaseAuthException e) {
-          setState(() => _isLoading = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text("Real SMS Sending Failed: ${e.message}"),
-              backgroundColor: Colors.red,
-            ),
-          );
-        },
-        codeSent: (String verificationId, int? resendToken) {
-          setState(() {
-            _isLoading = false;
-            _isOtpSent = true;
-            _verificationId = verificationId;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text("Real OTP Code sent directly to your phone via SMS!"),
-              backgroundColor: Colors.green,
-            ),
-          );
-        },
-        codeAutoRetrievalTimeout: (String verificationId) {
-          _verificationId = verificationId;
-        },
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("OTP dispatched to your phone via ${_selectedMethod.toUpperCase()}!"),
+          backgroundColor: Colors.green,
+        ),
       );
     } catch (e) {
       setState(() => _isLoading = false);
@@ -118,68 +74,64 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
 
     try {
-      if (_verificationId == "WHATSAPP_ROUTING") {
-        final result = await _apiService.verifyOtp(_phoneController.text, _otpController.text);
-        setState(() => _isLoading = false);
-        if (result["success"] == true || result.containsKey("user_id")) {
-          _navigateToNextScreen();
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(result["message"] ?? "Invalid verification token")),
-          );
-        }
-        return;
-      }
-
-      // Verify authentic Firebase live code entered by user
-      PhoneAuthCredential credential = PhoneAuthProvider.credential(
-        verificationId: _verificationId,
-        smsCode: _otpController.text,
-      );
-
-      await _auth.signInWithCredential(credential);
+      final result = await _apiService.verifyOtp(_phoneController.text, _otpController.text);
       setState(() => _isLoading = false);
-      _navigateToNextScreen();
+      
+      if (result["success"] == true || result.containsKey("user_id")) {
+        int userId = result["user_id"];
+        bool needsFaceSetup = result["needs_face_setup"] ?? false;
+        String userName = result["name"] ?? "Faculty Member";
+        
+        if (mounted) {
+          if (needsFaceSetup) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("First-time login detected! Opening Face Registration Setup."),
+                backgroundColor: Colors.orange,
+              ),
+            );
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(
+                builder: (context) => FaceRegistrationScreen(
+                  phone: _phoneController.text,
+                  userId: userId,
+                  userName: userName,
+                ),
+              ),
+            );
+          } else {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("Authentication Verified Successfully! Opening Dashboard Screen."),
+                backgroundColor: Colors.green,
+              ),
+            );
+            Navigator.pushReplacement(
+              context,
+              MaterialPageRoute(builder: (context) => const DashboardScreen()),
+            );
+          }
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result["message"] ?? "Incorrect OTP code entered. Please check and try again."),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
     } catch (e) {
       setState(() => _isLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text("Incorrect OTP code entered. Please check your phone messages and try again."),
+          content: Text("Error performing verification. Please try again."),
           backgroundColor: Colors.red,
         ),
       );
     }
   }
 
-  void _navigateToNextScreen() {
-    if (mounted) {
-      if (_isNewUser) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Authentication Verified! Opening Face Profile Registration Setup."),
-            backgroundColor: Colors.orange,
-          ),
-        );
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => FaceRegistrationScreen(phone: _phoneController.text),
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Authentication Verified Successfully! Opening Dashboard Screen."),
-            backgroundColor: Colors.green,
-          ),
-        );
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (context) => const DashboardScreen()),
-        );
-      }
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
