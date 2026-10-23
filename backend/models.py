@@ -37,6 +37,8 @@ class Attendance(Base):
     punch_in = Column(DateTime)
     punch_out = Column(DateTime)
     status = Column(String(20)) # Present, Absent, Leave
+    out_of_range_reason = Column(String(100), nullable=True) # LJ, MoneyPlant, Other
+    out_of_range_remarks = Column(String(500), nullable=True)
 
 class Break(Base):
     __tablename__ = "breaks"
@@ -44,6 +46,15 @@ class Break(Base):
     attendance_id = Column(Integer, ForeignKey("attendance.id"))
     break_in = Column(DateTime)
     break_out = Column(DateTime)
+    duration_seconds = Column(Integer, default=0)
+
+class Event(Base):
+    __tablename__ = "events"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200))
+    description = Column(String(1000))
+    date = Column(String(50))
+    created_at = Column(DateTime, default=datetime.datetime.now)
 
 class LeaveRequest(Base):
     __tablename__ = "leave_requests"

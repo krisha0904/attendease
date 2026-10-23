@@ -6,16 +6,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Get URL from .env file
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
+# Get URL from .env file or default to local SQLite database
+SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL") or "sqlite:///./attendance.db"
 
 # Configure engine based on DB type
-if SQLALCHEMY_DATABASE_URL and SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
+if "sqlite" in SQLALCHEMY_DATABASE_URL:
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
     )
 else:
-    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    try:
+        engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    except Exception:
+        # Fallback to local SQLite if MySQL connection fails
+        SQLALCHEMY_DATABASE_URL = "sqlite:///./attendance.db"
+        engine = create_engine(
+            SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+        )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

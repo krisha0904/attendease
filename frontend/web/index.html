@@ -1,46 +1,289 @@
 <!DOCTYPE html>
-<html>
-<head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="AttendEase faculty attendance website" />
+    <title>AttendEase | Faculty Attendance</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="phone-shell">
+      <div class="status-bar">
+        <div class="status-left">2:59</div>
+        <div class="status-right">
+          <div aria-label="Signal" class="signal">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <div class="battery" aria-label="Battery"></div>
+        </div>
+      </div>
 
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
+      <div class="header">
+        <div class="menu-icon" aria-label="Menu">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="logo">
+          <div class="logo-mark"></div>
+          <div>
+            <div class="logo-text">Cognisun</div>
+            <span class="logo-sub">The wings of innovation</span>
+          </div>
+        </div>
+        <div class="user-bubble" aria-label="Profile"></div>
+      </div>
 
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+      <section class="screen active login-layout" data-screen="login">
+        <div class="brand-hero">
+          <div class="om365">
+            <div class="ring"></div>
+            <div class="word">OM365<span>AIM TO ACHIEVE</span></div>
+          </div>
+        </div>
 
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
-  <base href="$FLUTTER_BASE_HREF">
+        <div class="login-panel">
+          <h1 class="login-title">Login with OTP</h1>
+          <div class="login-subtitle">Use your registered email or phone number</div>
 
-  <meta charset="UTF-8">
-  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+          <div class="auth-mode-toggle" style="display:flex; gap:12px; margin-bottom:16px;">
+            <button type="button" class="mode-button active" data-mode="email" style="flex:1; border:1px solid #d9e3ee; background:#eaf5ff; color:#1b4f8a; border-radius:12px; padding:10px 12px; font-weight:700; cursor:pointer;">Email OTP</button>
+            <button type="button" class="mode-button" data-mode="sms" style="flex:1; border:1px solid #d9e3ee; background:#f5f7fa; color:#475569; border-radius:12px; padding:10px 12px; font-weight:700; cursor:pointer;">SMS OTP</button>
+          </div>
 
-  <!-- iOS meta tags & icons -->
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="faculty_attendance">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+          <div class="field-label" id="identifierLabel">Email Address</div>
+          <div class="phone-box">
+            <div class="country-flag" id="countryFlag">✉️</div>
+            <div class="country-code" id="countryCode">@</div>
+            <input class="phone-input" id="identifierInput" type="text" value="" placeholder="Enter your email address" />
+          </div>
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+          <div class="field-label" id="otpLabel" style="display:none; margin-top:18px;">Enter OTP</div>
+          <div class="phone-box" id="otpBox" style="display:none; margin-top:10px;">
+            <div class="country-flag">🔐</div>
+            <div class="country-code">OTP</div>
+            <input class="phone-input" id="otpInput" type="text" value="" placeholder="6-digit code" maxlength="6" />
+          </div>
 
-  <title>faculty_attendance</title>
-  <link rel="manifest" href="manifest.json">
-</head>
-<body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
+          <div class="checkbox-row">
+            <span class="checkmark"></span>
+            <span>I agree to the <span class="link-text">Terms & Conditions</span></span>
+          </div>
 
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
-  <script src="flutter_bootstrap.js" async></script>
-</body>
+          <div id="messageBox" style="display:none; color:#0f766e; background:#ecfeff; border:1px solid #a5f3fc; padding:10px 12px; border-radius:10px; margin-bottom:12px; font-size:0.95rem;"></div>
+
+          <button class="cta-button" id="loginButton">Send OTP</button>
+
+          <button class="secondary-link" id="showRegisterButton" type="button">New user? Register here</button>
+          <div class="powered">Powered by <strong>Cognisun Infotech</strong></div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="register">
+        <div class="register-panel">
+          <div class="screen-header">
+            <button class="back-button" id="backToLogin" type="button">←</button>
+            <h2>Register Faculty</h2>
+          </div>
+
+          <div class="register-form">
+            <div class="form-grid">
+              <label>
+                Faculty ID
+                <input id="registerFacultyId" type="text" placeholder="e.g. FAC-1024" />
+              </label>
+              <label>
+                Full Name
+                <input id="registerName" type="text" placeholder="Enter full name" />
+              </label>
+            </div>
+
+            <div class="form-grid">
+              <label>
+                Email
+                <input id="registerEmail" type="email" placeholder="name@college.edu" />
+              </label>
+              <label>
+                Phone
+                <input id="registerPhone" type="tel" placeholder="Enter phone number" />
+              </label>
+            </div>
+
+            <label>
+              Department
+              <select id="registerDepartment">
+                <option value="1">Computer Science</option>
+                <option value="2">Mechanical</option>
+                <option value="3">Electrical</option>
+                <option value="4">Administration</option>
+              </select>
+            </label>
+
+            <button id="registerSubmit" class="cta-button" type="button">Create Account</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="dashboard">
+        <div class="greeting">
+          <h1>Good Evening, <span style="color:#1f2c3d;">KRISHA</span> <span class="emoji">👋</span></h1>
+        </div>
+        <div class="date-line">Friday, 2 October 2026</div>
+
+        <div class="status-tag" style="margin-top: 18px; margin-bottom: 8px; margin-left: 0;">
+          <span class="status-dot"></span> Working
+        </div>
+
+        <div class="timer-wrap">
+          <div class="timer-inner">
+            <div class="time">04:01:49</div>
+            <div class="label">Working</div>
+            <div class="status">Punch In</div>
+          </div>
+        </div>
+
+        <div class="primary-row">
+          <button class="action-btn primary">Punch Out</button>
+          <button class="action-btn secondary">Break In</button>
+        </div>
+
+        <div class="info-grid">
+          <div class="info-box">
+            <div>
+              <div class="info-title">Punch In Time</div>
+              <div class="info-value" style="font-size: 1.7rem;">02:02 PM</div>
+            </div>
+          </div>
+          <div class="info-box">
+            <div>
+              <div class="info-title">Working Hours</div>
+              <div class="info-value" style="font-size: 1.7rem;">04:01</div>
+            </div>
+          </div>
+          <div class="info-box">
+            <div>
+              <div class="info-title">Break In Time</div>
+              <div class="info-value" style="font-size: 1.7rem;">—</div>
+            </div>
+          </div>
+          <div class="info-box">
+            <div>
+              <div class="info-title">Break Duration</div>
+              <div class="info-value" style="font-size: 1.7rem;">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="progress-card">
+          <div class="progress-name">
+            <span>Work Progress</span>
+            <span class="amount" style="color:#0f172a;">04:01 / 16h 30m</span>
+          </div>
+          <div class="progress-track"><span class="progress-bar"></span></div>
+          <div class="progress-meta">
+            <span>02:02 PM start</span>
+            <span>— end</span>
+          </div>
+          <div class="legend">
+            <span><i style="background:#ef4444"></i>Late-in</span>
+            <span><i style="background:#1a8ed8"></i>Working</span>
+            <span><i style="background:#b7c3cf"></i>Remaining</span>
+          </div>
+        </div>
+
+        <div class="bottom-nav">
+          <div class="nav-item active" data-screen="dashboard">
+            <span class="nav-icon home-icon"></span>
+            <span>Dashboard</span>
+          </div>
+          <div class="nav-item" data-screen="directory">
+            <span class="nav-icon people-icon"></span>
+            <span>Directory</span>
+          </div>
+          <div class="nav-item" data-screen="task">
+            <span class="nav-icon task-icon"></span>
+            <span>Task</span>
+          </div>
+          <div class="nav-item" data-screen="profile">
+            <span class="nav-icon profile-icon"></span>
+            <span>Profile</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="success">
+        <div class="greeting" style="display:block; margin-top: 8px;">
+          <h1 style="font-size:2.5rem; margin-bottom:10px;">Good Evening, KRISHA <span class="emoji">👋</span></h1>
+        </div>
+
+        <div class="banner-green">
+          <span>Happy Birthday Kautilya Vaidya!</span>
+          <span class="plus">+1</span>
+        </div>
+
+        <div class="success-ring">
+          <div class="success-inner">✓</div>
+        </div>
+
+        <div class="center-copy">
+          <h2>Punched Out</h2>
+          <p>Shift Completed</p>
+        </div>
+
+        <div class="meta-list">
+          <div class="meta-cell">
+            <div class="mini">Punch In Time</div>
+            <div class="value">01:57 PM</div>
+          </div>
+          <div class="meta-cell">
+            <div class="mini">Working Hours</div>
+            <div class="value">03:16</div>
+          </div>
+          <div class="meta-cell">
+            <div class="mini">Break In Time</div>
+            <div class="value">—</div>
+          </div>
+          <div class="meta-cell">
+            <div class="mini">Break Duration</div>
+            <div class="value">—</div>
+          </div>
+        </div>
+
+        <div class="inline-summary">
+          <strong>Work Progress</strong>
+          <span class="amount">03:16 / 16h 30m</span>
+        </div>
+        <div class="inline-progress"><span></span></div>
+        <div class="progress-meta" style="margin-top: 10px;">
+          <span>01:57 PM start</span>
+          <span>06:02 PM end</span>
+        </div>
+        <div class="legend-row">
+          <span><i class="dot" style="background:#ef4444"></i>Late-in</span>
+          <span><i class="dot" style="background:#1a8ed8"></i>Working</span>
+          <span><i class="dot" style="background:#c8d2dc"></i>Remaining</span>
+        </div>
+
+        <div class="bottom-nav" style="margin-top: 18px;">
+          <div class="nav-item active" data-screen="dashboard">
+            <span class="nav-icon home-icon"></span>
+            <span>Dashboard</span>
+          </div>
+          <div class="nav-item" data-screen="directory">
+            <span class="nav-icon people-icon"></span>
+            <span>Directory</span>
+          </div>
+          <div class="nav-item" data-screen="task">
+            <span class="nav-icon task-icon"></span>
+            <span>Task</span>
+          </div>
+          <div class="nav-item" data-screen="profile">
+            <span class="nav-icon profile-icon"></span>
+            <span>Profile</span>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
 </html>

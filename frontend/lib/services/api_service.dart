@@ -106,6 +106,8 @@ class ApiService {
     required double lat,
     required double lng,
     required String faceImageBase64,
+    String? outOfRangeReason,
+    String? outOfRangeRemarks,
   }) async {
     try {
       final response = await http.post(
@@ -116,11 +118,61 @@ class ApiService {
           "lat": lat,
           "lng": lng,
           "face_image_base64": faceImageBase64,
+          "out_of_range_reason": outOfRangeReason,
+          "out_of_range_remarks": outOfRangeRemarks,
         }),
       );
       return response.statusCode == 200;
     } catch (e) {
       print("Error punching in: $e");
+      return false;
+    }
+  }
+
+  Future<List<dynamic>> getEvents() async {
+    try {
+      final response = await http.get(Uri.parse("$baseUrl/events"));
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body);
+      }
+      return [];
+    } catch (e) {
+      print("Error fetching events: $e");
+      return [];
+    }
+  }
+
+  Future<Map<String, dynamic>> sendHrOtp(int userId, String hrPhone, {String method = "whatsapp"}) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/hr/send-otp"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_id": userId,
+          "hr_phone": hrPhone,
+          "method": method,
+        }),
+      );
+      return jsonDecode(response.body);
+    } catch (e) {
+      print("Error sending HR OTP: $e");
+      return {"status": "error", "message": "Failed to connect to HR OTP service"};
+    }
+  }
+
+  Future<bool> verifyHrOtp(int userId, String otp) async {
+    try {
+      final response = await http.post(
+        Uri.parse("$baseUrl/hr/verify-otp"),
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({
+          "user_id": userId,
+          "otp": otp,
+        }),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      print("Error verifying HR OTP: $e");
       return false;
     }
   }
