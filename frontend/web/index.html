@@ -26,8 +26,7 @@
         <div class="logo">
           <div class="logo-mark"></div>
           <div>
-            <div class="logo-text">Cognisun</div>
-            <span class="logo-sub">The wings of innovation</span>
+            <div class="logo-text">AttendEase</div>
           </div>
         </div>
         <div class="user-bubble" aria-label="Profile"></div>
@@ -37,7 +36,7 @@
         <div class="brand-hero">
           <div class="om365">
             <div class="ring"></div>
-            <div class="word">OM365<span>AIM TO ACHIEVE</span></div>
+            <div class="word">AttendEase<span>Faculty Attendance</span></div>
           </div>
         </div>
 
@@ -45,7 +44,7 @@
           <h1 class="login-title">Login with OTP</h1>
           <div class="login-subtitle">Use your registered email or phone number</div>
 
-          <div class="auth-mode-toggle" style="display:flex; gap:12px; margin-bottom:16px;">
+          <div class="auth-mode-toggle" style="display:none; gap:12px; margin-bottom:16px;">
             <button type="button" class="mode-button active" data-mode="email" style="flex:1; border:1px solid #d9e3ee; background:#eaf5ff; color:#1b4f8a; border-radius:12px; padding:10px 12px; font-weight:700; cursor:pointer;">Email OTP</button>
             <button type="button" class="mode-button" data-mode="sms" style="flex:1; border:1px solid #d9e3ee; background:#f5f7fa; color:#475569; border-radius:12px; padding:10px 12px; font-weight:700; cursor:pointer;">SMS OTP</button>
           </div>
@@ -64,17 +63,16 @@
             <input class="phone-input" id="otpInput" type="text" value="" placeholder="6-digit code" maxlength="6" />
           </div>
 
-          <div class="checkbox-row">
-            <span class="checkmark"></span>
+          <label class="checkbox-row" for="loginTermsCheckbox">
+            <input id="loginTermsCheckbox" type="checkbox" class="terms-checkbox" />
             <span>I agree to the <span class="link-text">Terms & Conditions</span></span>
-          </div>
+          </label>
 
           <div id="messageBox" style="display:none; color:#0f766e; background:#ecfeff; border:1px solid #a5f3fc; padding:10px 12px; border-radius:10px; margin-bottom:12px; font-size:0.95rem;"></div>
 
           <button class="cta-button" id="loginButton">Send OTP</button>
 
           <button class="secondary-link" id="showRegisterButton" type="button">New user? Register here</button>
-          <div class="powered">Powered by <strong>Cognisun Infotech</strong></div>
         </div>
       </section>
 
@@ -118,6 +116,11 @@
               </select>
             </label>
 
+            <label class="checkbox-row register-checkbox" for="registerTermsCheckbox">
+              <input id="registerTermsCheckbox" type="checkbox" class="terms-checkbox" />
+              <span>I agree to the <span class="link-text">Terms & Conditions</span></span>
+            </label>
+
             <button id="registerSubmit" class="cta-button" type="button">Create Account</button>
           </div>
         </div>
@@ -125,9 +128,9 @@
 
       <section class="screen" data-screen="dashboard">
         <div class="greeting">
-          <h1>Good Evening, <span style="color:#1f2c3d;">KRISHA</span> <span class="emoji">👋</span></h1>
+          <h1 id="dashboardUserName">Good Evening, <span style="color:#1f2c3d;">KRISHA</span> <span class="emoji">👋</span></h1>
         </div>
-        <div class="date-line">Friday, 2 October 2026</div>
+        <div class="date-line" id="dashboardDateLine">Friday, 2 October 2026</div>
 
         <div class="status-tag" style="margin-top: 18px; margin-bottom: 8px; margin-left: 0;">
           <span class="status-dot"></span> Working
@@ -142,8 +145,8 @@
         </div>
 
         <div class="primary-row">
-          <button class="action-btn primary">Punch Out</button>
-          <button class="action-btn secondary">Break In</button>
+          <button class="action-btn primary" id="punchOutButton">Punch Out</button>
+          <button class="action-btn secondary" id="breakInButton">Break In</button>
         </div>
 
         <div class="info-grid">
@@ -195,6 +198,10 @@
             <span class="nav-icon home-icon"></span>
             <span>Dashboard</span>
           </div>
+          <div class="nav-item" data-screen="hod">
+            <span class="nav-icon people-icon"></span>
+            <span>HOD</span>
+          </div>
           <div class="nav-item" data-screen="directory">
             <span class="nav-icon people-icon"></span>
             <span>Directory</span>
@@ -208,6 +215,94 @@
             <span>Profile</span>
           </div>
         </div>
+      </section>
+
+      <section class="screen" data-screen="hod">
+        <div class="section-header">
+          <button class="back-button" type="button" data-back="dashboard">←</button>
+          <h2>Department Dashboard</h2>
+        </div>
+
+        <div class="hod-summary-grid">
+          <div class="hod-stat-box present">
+            <div class="hod-stat-label">Present</div>
+            <div class="hod-stat-value" id="hodPresentCount">0</div>
+          </div>
+          <div class="hod-stat-box break">
+            <div class="hod-stat-label">On Break</div>
+            <div class="hod-stat-value" id="hodBreakCount">0</div>
+          </div>
+          <div class="hod-stat-box absent">
+            <div class="hod-stat-label">Absent</div>
+            <div class="hod-stat-value" id="hodAbsentCount">0</div>
+          </div>
+        </div>
+
+        <div class="list-card hod-list-card">
+          <div class="list-header-row">
+            <strong>Faculty & Staff Today</strong>
+            <span class="small-pill">Live</span>
+          </div>
+          <div id="hodStaffList" class="hod-staff-list"></div>
+        </div>
+
+        <div class="list-card hod-list-card" style="margin-top: 16px;">
+          <div class="list-header-row">
+            <strong>Leave Requests</strong>
+            <span class="small-pill">Review</span>
+          </div>
+          <div id="hodLeaveList" class="hod-staff-list"></div>
+        </div>
+      </section>
+
+      <section class="screen" data-screen="directory">
+        <div class="section-header">
+          <button class="back-button" type="button" data-back="dashboard">←</button>
+          <h2>Faculty Directory</h2>
+        </div>
+        <div id="directoryList" class="list-card"></div>
+      </section>
+
+      <section class="screen" data-screen="task">
+        <div class="section-header">
+          <button class="back-button" type="button" data-back="dashboard">←</button>
+          <h2>Leave Request</h2>
+        </div>
+        <div class="task-form">
+          <label>
+            Leave Type
+            <select id="leaveType">
+              <option value="Sick">Sick</option>
+              <option value="Casual">Casual</option>
+              <option value="Personal">Personal</option>
+              <option value="Annual">Annual</option>
+            </select>
+          </label>
+          <div class="form-grid">
+            <label>
+              Start Date
+              <input id="leaveStartDate" type="date" />
+            </label>
+            <label>
+              End Date
+              <input id="leaveEndDate" type="date" />
+            </label>
+          </div>
+          <label>
+            Reason
+            <textarea id="leaveReason" rows="4" placeholder="Explain reason for leave"></textarea>
+          </label>
+          <button id="applyLeaveButton" class="cta-button" type="button">Apply Leave</button>
+        </div>
+        <div id="leaveList" class="list-card" style="margin-top: 18px;"></div>
+      </section>
+
+      <section class="screen" data-screen="profile">
+        <div class="section-header">
+          <button class="back-button" type="button" data-back="dashboard">←</button>
+          <h2>Profile</h2>
+        </div>
+        <div id="profileCard" class="profile-card"></div>
       </section>
 
       <section class="screen" data-screen="success">

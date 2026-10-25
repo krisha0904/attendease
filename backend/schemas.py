@@ -60,6 +60,9 @@ class LeaveRequestCreate(BaseModel):
     reason: str
     leave_type: str # Sick, Casual, etc.
 
+class LeaveStatusUpdate(BaseModel):
+    status: str
+
 class LeaveResponse(LeaveRequestCreate):
     id: int
     status: str # Pending, Approved, Rejected

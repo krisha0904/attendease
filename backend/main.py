@@ -10,6 +10,8 @@ import json
 import numpy as np
 import random
 import os
+import smtplib
+from email.message import EmailMessage
 from database import engine, get_db, SessionLocal
 import uvicorn
 from dotenv import load_dotenv
@@ -25,8 +27,15 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USERNAME
+DEBUG_OTP = os.getenv("DEBUG_OTP", "false").lower() == "true"
 
 models.Base.metadata.create_all(bind=engine)
+database.ensure_database_schema()
 
 # Seed initial data
 db_session = SessionLocal()
@@ -95,6 +104,31 @@ def haversine(lat1, lon1, lat2, lon2):
 
     distance = R * c * 1000 # Convert to meters
     return distance
+
+
+def send_email_otp(recipient: str, otp: str) -> bool:
+    if not SMTP_HOST or not SMTP_USERNAME or not SMTP_PASSWORD:
+        print(f"\nEMAIL OTP READY (SMTP not configured): {otp} for {recipient}\n")
+        return False
+
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "Your AttendEase login OTP"
+        msg["From"] = SMTP_FROM or SMTP_USERNAME
+        msg["To"] = recipient
+        msg.set_content(
+            f"Your AttendEase login OTP is: {otp}\n\n"
+            "Use this code to verify your identity and continue login."
+        )
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as exc:
+        print(f"SMTP delivery failed for {recipient}: {exc}")
+        return False
 
 @app.get("/")
 def read_root():
@@ -165,42 +199,51 @@ def send_otp(identifier: str, method: str = "sms", db: Session = Depends(get_db)
         otp_storage[lookup_email] = otp
 
     formatted_phone = lookup if lookup.startswith("+") else f"+91{lookup}" if lookup.isdigit() else lookup
-    success = False
+    sms_success = False
+    email_success = False
     error_msg = ""
 
-    if "@" not in lookup and Client and TWILIO_ACCOUNT_SID and "ACxxx" not in TWILIO_ACCOUNT_SID:
+    if "@" in lookup:
+        email_success = send_email_otp(lookup_email or lookup, otp)
+    elif Client and TWILIO_ACCOUNT_SID and "ACxxx" not in TWILIO_ACCOUNT_SID:
         try:
             client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
             if method == "whatsapp":
                 message = client.messages.create(
                     from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                    body=f"Your Smart Attendance verification code is: {otp}",
+                    body=f"Your AttendEase verification code is: {otp}",
                     to=f"whatsapp:{formatted_phone}"
                 )
             else:
                 message = client.messages.create(
-                    body=f"Your Smart Attendance verification code is: {otp}",
+                    body=f"Your AttendEase verification code is: {otp}",
                     from_=TWILIO_PHONE_NUMBER,
                     to=formatted_phone
                 )
-            success = True
+            sms_success = True
             print(f"Twilio Message Sent: {message.sid}")
         except Exception as e:
             error_msg = str(e)
             print(f"Twilio Error: {e}")
+    else:
+        print(f"\n{'='*20}\nOTP READY FOR SMS: {otp} for {lookup}\n{'='*20}\n")
 
     channel = "EMAIL" if "@" in lookup else method.upper()
     print(f"\n{'='*20}")
-    print(f"DEBUG OTP: {otp} for {lookup} via {channel}")
+    print(f"OTP READY: {otp} for {lookup} via {channel}")
     if error_msg:
-        print(f"TWILIO FAILED: {error_msg}")
+        print(f"DELIVERY FAILED: {error_msg}")
     print(f"{'='*20}\n")
 
-    return {
+    payload = {
         "message": f"OTP sent successfully via {channel.lower()}",
-        "otp": otp,
-        "twilio_success": success
+        "sms_success": sms_success,
+        "email_success": email_success,
+        "delivery_status": "email" if "@" in lookup else ("sms" if sms_success else "queued")
     }
+    if DEBUG_OTP:
+        payload["otp"] = otp
+    return payload
 
 @app.post("/verify-otp")
 def verify_otp(request: schemas.OTPVerifyRequest, db: Session = Depends(get_db)):
@@ -337,31 +380,28 @@ def punch_out(punch: schemas.PunchOutRequest, db: Session = Depends(get_db)):
         db.commit()
         return {"status": "success", "message": f"Punched out at {now.strftime('%H:%M %p')}"}
 
-@app.get("/attendance/report")
-def get_attendance_report(
-    user_id: Optional[int] = None,
-    db: Session = Depends(get_db)
-):
+def build_attendance_report(db: Session, user_id: Optional[int] = None):
     query = db.query(models.Attendance, models.User).join(models.User, models.Attendance.user_id == models.User.id)
     if user_id:
         query = query.filter(models.Attendance.user_id == user_id)
 
-    records = query.all()
+    records = query.order_by(models.Attendance.punch_in.desc()).all()
     results = []
+
     for att, usr in records:
         in_str = att.punch_in.strftime("%Y-%m-%d %H:%M:%S") if att.punch_in else "--"
         out_str = att.punch_out.strftime("%Y-%m-%d %H:%M:%S") if att.punch_out else "Active"
 
-        duration_str = "--"
+        duration_seconds = 0
         if att.punch_in and att.punch_out:
-            diff = att.punch_out - att.punch_in
-            hours, remainder = divmod(diff.seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
-            duration_str = f"{hours}h {minutes}m"
+            duration_seconds = int((att.punch_out - att.punch_in).total_seconds())
         elif att.punch_in:
-            diff = datetime.datetime.now() - att.punch_in
-            hours, remainder = divmod(diff.seconds, 3600)
-            minutes, _ = divmod(remainder, 60)
+            duration_seconds = int((datetime.datetime.now() - att.punch_in).total_seconds())
+
+        hours, remainder = divmod(duration_seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        duration_str = f"{hours}h {minutes}m" if duration_seconds else "--"
+        if att.punch_in and not att.punch_out:
             duration_str = f"{hours}h {minutes}m (Active)"
 
         results.append({
@@ -372,49 +412,249 @@ def get_attendance_report(
             "date": att.date.strftime("%Y-%m-%d") if att.date else "--",
             "punch_in": in_str,
             "punch_out": out_str,
-            "status": att.status,
+            "status": att.status or "Present",
             "work_duration": duration_str,
-            "out_of_range_reason": att.out_of_range_reason or "In Range"
+            "out_of_range_reason": att.out_of_range_reason or "In Range",
+            "total_minutes": int(duration_seconds / 60),
         })
+
     return results
+
+
+@app.get("/attendance/report")
+def get_attendance_report(
+    user_id: Optional[int] = None,
+    db: Session = Depends(get_db)
+):
+    return build_attendance_report(db, user_id=user_id)
+
+
+@app.get("/attendance/summary")
+def get_attendance_summary(db: Session = Depends(get_db)):
+    rows = build_attendance_report(db)
+    total_minutes = sum(item["total_minutes"] for item in rows)
+    present = sum(1 for item in rows if item["status"] == "Present")
+    return {
+        "total_records": len(rows),
+        "total_minutes": total_minutes,
+        "present_records": present,
+        "records": rows[:10],
+    }
 
 @app.get("/departments")
 def get_departments(db: Session = Depends(get_db)):
     return db.query(models.Department).all()
+
+@app.get("/users/{user_id}")
+def get_user_profile(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return {
+        "id": user.id,
+        "faculty_id": user.faculty_id,
+        "name": user.name,
+        "email": user.email,
+        "phone": user.phone,
+        "role": user.role,
+        "department_id": user.department_id,
+    }
+
+@app.get("/attendance/summary/{user_id}")
+def get_user_attendance_summary(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    records = db.query(models.Attendance).filter(models.Attendance.user_id == user_id).order_by(models.Attendance.id.desc()).all()
+    total_seconds = 0
+    current_active = None
+
+    for record in records:
+        if record.punch_in and record.punch_out:
+            total_seconds += int((record.punch_out - record.punch_in).total_seconds())
+        elif record.punch_in:
+            current_active = record
+
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    latest = records[0] if records else None
+    punch_in = latest.punch_in.strftime("%I:%M %p") if latest and latest.punch_in else None
+    status = "Present" if current_active else ("Checked Out" if latest and latest.punch_out else "Not Started")
+
+    return {
+        "user_id": user.id,
+        "name": user.name,
+        "faculty_id": user.faculty_id,
+        "total_work_hours": f"{hours}h {minutes}m",
+        "punch_in": punch_in,
+        "status": status,
+        "records_count": len(records),
+    }
 
 @app.post("/attendance/break")
 def toggle_break(user_id: int, db: Session = Depends(get_db)):
     return {"status": "success", "message": "Break status updated"}
 
 # HOD / Admin Endpoints
+def get_user_status_for_today(db: Session, user_id: int):
+    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+    today_end = today_start + datetime.timedelta(days=1)
+
+    attendance_records = db.query(models.Attendance).filter(
+        models.Attendance.user_id == user_id,
+        models.Attendance.punch_in >= today_start,
+        models.Attendance.punch_in < today_end,
+    ).order_by(models.Attendance.id.desc()).all()
+
+    if not attendance_records:
+        return {"status": "ABSENT", "time": "--"}
+
+    latest = attendance_records[0]
+    active_break = db.query(models.Break).filter(
+        models.Break.attendance_id == latest.id,
+        models.Break.break_in.is_not(None),
+        models.Break.break_out.is_(None),
+    ).first()
+
+    if active_break:
+        return {"status": "ON BREAK", "time": active_break.break_in.strftime("%I:%M %p") if active_break.break_in else "--"}
+
+    if latest.punch_out is not None:
+        return {"status": "WORKING", "time": latest.punch_in.strftime("%I:%M %p") if latest.punch_in else "--"}
+
+    return {"status": "WORKING", "time": latest.punch_in.strftime("%I:%M %p") if latest.punch_in else "--"}
+
+
+def build_hod_dashboard_summary(db: Session):
+    users = db.query(models.User).order_by(models.User.name.asc()).all()
+    staff_list = []
+    present = 0
+    on_break = 0
+    absent = 0
+
+    for user in users:
+        status_info = get_user_status_for_today(db, user.id)
+        status = status_info["status"]
+        if status == "WORKING":
+            present += 1
+        elif status == "ON BREAK":
+            on_break += 1
+        else:
+            absent += 1
+
+        staff_list.append({
+            "name": user.name,
+            "status": status,
+            "time": status_info["time"],
+        })
+
+    return {
+        "present": present,
+        "on_break": on_break,
+        "absent": absent,
+        "staff_list": staff_list,
+    }
+
+
 @app.get("/hod/dashboard-summary")
 def get_hod_summary(db: Session = Depends(get_db)):
-    # Logic to count present, on break, absent
+    return build_hod_dashboard_summary(db)
+
+
+def get_leave_status_for_user(db: Session, user_id: int):
+    leave_requests = db.query(models.LeaveRequest).filter(
+        models.LeaveRequest.user_id == user_id,
+    ).order_by(models.LeaveRequest.created_at.desc()).all()
+
+    return [
+        {
+            "id": item.id,
+            "user_id": item.user_id,
+            "leave_type": item.leave_type,
+            "reason": item.reason,
+            "status": item.status,
+            "start_date": item.start_date.isoformat() if item.start_date else None,
+            "end_date": item.end_date.isoformat() if item.end_date else None,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        }
+        for item in leave_requests
+    ]
+
+
+def get_faculty_details_by_id(db: Session, faculty_id: str):
+    user = db.query(models.User).filter(
+        models.User.faculty_id == faculty_id
+    ).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+
+    rows = db.query(models.Attendance).filter(
+        models.Attendance.user_id == user.id
+    ).order_by(models.Attendance.id.desc()).all()
+
+    total_seconds = 0
+    latest_attendance = rows[0] if rows else None
+    break_rows = []
+
+    for row in rows:
+        if row.punch_in and row.punch_out:
+            total_seconds += int((row.punch_out - row.punch_in).total_seconds())
+
+        attendance_breaks = db.query(models.Break).filter(
+            models.Break.attendance_id == row.id,
+            models.Break.break_in.is_not(None),
+        ).order_by(models.Break.id.asc()).all()
+        for item in attendance_breaks:
+            if item.break_in and item.break_out:
+                duration = int((item.break_out - item.break_in).total_seconds())
+                item_duration_minutes = max(0, int(duration / 60))
+                break_rows.append({
+                    "in": item.break_in.strftime("%I:%M %p"),
+                    "out": item.break_out.strftime("%I:%M %p"),
+                    "duration_minutes": item_duration_minutes,
+                })
+
+    total_minutes = max(0, int(total_seconds / 60))
+    break_minutes = sum(item["duration_minutes"] for item in break_rows)
+
     return {
-        "present": 18,
-        "on_break": 2,
-        "absent": 3,
-        "staff_list": [
-            {"name": "Dr. Patel", "status": "WORKING", "time": "09:02 AM"},
-            {"name": "Prof. Shah", "status": "WORKING", "time": "08:55 AM"},
-            {"name": "Prof. Mehta", "status": "ON BREAK", "time": "01:05 PM"},
-            {"name": "Prof. Kumar", "status": "ABSENT", "time": "--"},
-        ]
+        "name": user.name,
+        "faculty_id": user.faculty_id,
+        "punch_in": latest_attendance.punch_in.strftime("%I:%M %p") if latest_attendance and latest_attendance.punch_in else "--",
+        "punch_out": latest_attendance.punch_out.strftime("%I:%M %p") if latest_attendance and latest_attendance.punch_out else "--",
+        "total_work_minutes": total_minutes,
+        "total_break_minutes": break_minutes,
+        "breaks": break_rows,
     }
+
 
 @app.get("/hod/faculty-details/{faculty_id}")
 def get_faculty_details(faculty_id: str, db: Session = Depends(get_db)):
-    return {
-        "name": "Dr. Patel",
-        "punch_in": "09:02 AM",
-        "punch_out": "05:58 PM",
-        "total_work": "7h 59m",
-        "total_break": "47m",
-        "breaks": [
-            {"in": "11:15 AM", "out": "11:25 AM"},
-            {"in": "01:05 PM", "out": "01:42 PM"}
-        ]
-    }
+    return get_faculty_details_by_id(db, faculty_id)
+
+
+@app.get("/hod/leave-requests")
+def get_leave_requests(db: Session = Depends(get_db)):
+    requests = db.query(models.LeaveRequest).order_by(models.LeaveRequest.created_at.desc()).all()
+    payload = []
+    for item in requests:
+        user = db.query(models.User).filter(models.User.id == item.user_id).first()
+        payload.append({
+            "id": item.id,
+            "user_id": item.user_id,
+            "faculty_id": user.faculty_id if user else "N/A",
+            "name": user.name if user else "Unknown",
+            "leave_type": item.leave_type,
+            "reason": item.reason,
+            "status": item.status,
+            "start_date": item.start_date.isoformat() if item.start_date else None,
+            "end_date": item.end_date.isoformat() if item.end_date else None,
+        })
+    return payload
 
 # Leave Management
 @app.post("/leave/apply")
@@ -427,7 +667,25 @@ def apply_leave(leave: schemas.LeaveRequestCreate, db: Session = Depends(get_db)
 
 @app.get("/leave/status/{user_id}")
 def get_leave_status(user_id: int, db: Session = Depends(get_db)):
-    return db.query(models.LeaveRequest).filter(models.LeaveRequest.user_id == user_id).all()
+    return get_leave_status_for_user(db, user_id)
+
+
+@app.patch("/leave/{leave_id}/status")
+def update_leave_status(leave_id: int, payload: schemas.LeaveStatusUpdate, db: Session = Depends(get_db)):
+    leave_request = db.query(models.LeaveRequest).filter(models.LeaveRequest.id == leave_id).first()
+    if not leave_request:
+        raise HTTPException(status_code=404, detail="Leave request not found")
+
+    leave_request.status = payload.status.strip().title()
+    db.commit()
+    db.refresh(leave_request)
+    return {
+        "id": leave_request.id,
+        "user_id": leave_request.user_id,
+        "status": leave_request.status,
+        "message": "Leave status updated successfully",
+    }
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

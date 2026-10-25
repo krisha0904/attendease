@@ -4,9 +4,10 @@ sqlalchemy
 pydantic
 python-multipart
 numpy
-opencv-python
+opencv-python-headless
 pillow
 pymysql
 python-dotenv
 twilio
+face-recognition
 
