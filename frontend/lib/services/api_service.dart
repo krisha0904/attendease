@@ -4,9 +4,10 @@ import 'package:http/http.dart' as http;
 class ApiService {
   static const String baseUrl = "http://10.0.2.2:8000"; 
 
-  Future<Map<String, dynamic>> checkUserExists(String phone) async {
+  Future<Map<String, dynamic>> checkUserExists(String identifier) async {
     try {
-      final response = await http.get(Uri.parse("$baseUrl/check-user/$phone"));
+      final cleaned = identifier.trim();
+      final response = await http.get(Uri.parse("$baseUrl/check-user/${Uri.encodeComponent(cleaned)}"));
       if (response.statusCode == 200) {
         return jsonDecode(response.body);
       }
@@ -17,32 +18,39 @@ class ApiService {
     }
   }
 
-  Future<Map<String, dynamic>> sendOtp(String phone, {String method = "email"}) async {
+  Future<Map<String, dynamic>> sendOtp(String identifier, {String method = "email"}) async {
     try {
+      final cleaned = identifier.trim();
       final response = await http.post(
-        Uri.parse("$baseUrl/send-otp/$phone?method=$method"),
+        Uri.parse("$baseUrl/send-otp/${Uri.encodeComponent(cleaned)}?method=$method"),
       );
-      return jsonDecode(response.body);
+      final decoded = jsonDecode(response.body);
+      if (response.statusCode != 200) {
+        return {"message": decoded['detail'] ?? "Unable to send OTP"};
+      }
+      return decoded;
     } catch (e) {
       print("Error sending OTP: $e");
       return {"message": "Error connection to server"};
     }
   }
 
-  Future<Map<String, dynamic>> verifyOtp(String phone, String otp) async {
+  Future<Map<String, dynamic>> verifyOtp(String identifier, String otp) async {
     try {
+      final cleaned = identifier.trim();
       final response = await http.post(
         Uri.parse("$baseUrl/verify-otp"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "phone": phone,
+          "phone": cleaned,
           "otp": otp,
         }),
       );
       if (response.statusCode == 200) {
         return jsonDecode(response.body);
       }
-      return {"success": false, "message": "Invalid OTP"};
+      final decoded = jsonDecode(response.body);
+      return {"success": false, "message": decoded['detail'] ?? "Invalid OTP"};
     } catch (e) {
       print("Error verifying OTP: $e");
       return {"success": false, "message": "Server error"};

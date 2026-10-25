@@ -97,6 +97,26 @@ def haversine(lat1, lon1, lat2, lon2):
     return distance
 
 
+def normalize_identifier(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    if "@" in text:
+        return text.lower()
+
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if not digits:
+        return text.lower()
+
+    if len(digits) >= 10:
+        return digits[-10:]
+    return digits
+
+
 def send_email_otp(recipient: str, otp: str) -> bool:
     if not SMTP_HOST or not SMTP_USERNAME or not SMTP_PASSWORD:
         print(f"\nEMAIL OTP READY (SMTP not configured): {otp} for {recipient}\n")
@@ -128,10 +148,20 @@ def read_root():
 # Auth & User Endpoints
 @app.get("/check-user/{identifier}")
 def check_user(identifier: str, db: Session = Depends(get_db)):
-    lookup = identifier.strip()
-    db_user = db.query(models.User).filter(
-        or_(models.User.phone == lookup, models.User.email == lookup.lower())
-    ).first()
+    lookup = normalize_identifier(identifier)
+    if not lookup:
+        return {"exists": False}
+
+    lookup_email = lookup.lower() if "@" in lookup else None
+    phone_variants = {lookup}
+    if lookup.isdigit():
+        phone_variants.add(lookup)
+
+    filters = [models.User.phone.in_(list(phone_variants))]
+    if lookup_email:
+        filters.append(models.User.email == lookup_email)
+
+    db_user = db.query(models.User).filter(or_(*filters)).first()
     if db_user:
         return {"exists": True, "user_id": db_user.id}
     return {"exists": False}
@@ -175,23 +205,30 @@ def verify_hr_otp(req: schemas.AdminOTPVerifyRequest, db: Session = Depends(get_
 
 @app.post("/send-otp/{identifier}")
 def send_otp(identifier: str, method: str = "email", db: Session = Depends(get_db)):
-    lookup = identifier.strip()
-    lookup_email = lookup.lower() if "@" in lookup else None
+    lookup = normalize_identifier(identifier)
+    if not lookup:
+        raise HTTPException(status_code=404, detail="Account not found")
 
-    db_user = db.query(models.User).filter(
-        or_(models.User.phone == lookup, models.User.email == lookup_email)
-    ).first()
+    lookup_email = lookup.lower() if "@" in lookup else None
+    phone_variants = {lookup}
+    if lookup.isdigit():
+        phone_variants.add(lookup)
+
+    filters = [models.User.phone.in_(list(phone_variants))]
+    if lookup_email:
+        filters.append(models.User.email == lookup_email)
+
+    db_user = db.query(models.User).filter(or_(*filters)).first()
     if not db_user:
         raise HTTPException(status_code=404, detail="Account not found")
 
-    target_email = (lookup_email or lookup).lower()
-    if not db_user.email and not target_email:
+    target_email = db_user.email.lower() if db_user.email else (lookup_email or lookup).lower()
+    if not target_email or "@" not in target_email:
         raise HTTPException(status_code=400, detail="No email is registered for this account")
-    if db_user.email:
-        target_email = db_user.email.lower()
 
     otp = str(random.randint(100000, 999999))
     otp_storage[lookup] = otp
+    otp_storage[normalize_identifier(lookup)] = otp
     otp_storage[target_email] = otp
 
     email_success = send_email_otp(target_email, otp)
@@ -215,15 +252,26 @@ def verify_otp(request: schemas.OTPVerifyRequest, db: Session = Depends(get_db))
     if not identifier:
         raise HTTPException(status_code=400, detail="Phone or email is required")
 
-    lookup = identifier.strip()
-    stored_otp = otp_storage.get(lookup) or otp_storage.get(lookup.lower())
+    lookup = normalize_identifier(identifier)
+    if not lookup:
+        raise HTTPException(status_code=400, detail="Phone or email is required")
+
+    stored_otp = otp_storage.get(lookup) or otp_storage.get((lookup or "").lower()) or otp_storage.get(normalize_identifier(lookup))
     if stored_otp and stored_otp == request.otp:
         otp_storage.pop(lookup, None)
-        otp_storage.pop(lookup.lower(), None)
+        otp_storage.pop((lookup or "").lower(), None)
+        otp_storage.pop(normalize_identifier(lookup), None)
 
-        db_user = db.query(models.User).filter(
-            or_(models.User.phone == lookup, models.User.email == lookup.lower())
-        ).first()
+        lookup_email = lookup.lower() if "@" in lookup else None
+        phone_variants = {lookup}
+        if lookup.isdigit():
+            phone_variants.add(lookup)
+
+        filters = [models.User.phone.in_(list(phone_variants))]
+        if lookup_email:
+            filters.append(models.User.email == lookup_email)
+
+        db_user = db.query(models.User).filter(or_(*filters)).first()
         if not db_user:
             raise HTTPException(status_code=404, detail="Account not found")
 

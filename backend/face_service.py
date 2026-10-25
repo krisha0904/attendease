@@ -8,24 +8,6 @@ import requests
 from PIL import Image
 
 try:
-    from insightface.app import FaceAnalysis
-    INSIGHTFACE_AVAILABLE = True
-    INSIGHTFACE_APP = None
-except Exception as exc:  # pragma: no cover - optional dependency in some environments
-    FaceAnalysis = None
-    INSIGHTFACE_AVAILABLE = False
-    INSIGHTFACE_APP = None
-    print(f"Warning: insightface not available: {exc}")
-
-try:
-    import face_recognition
-    FACE_RECOGNITION_AVAILABLE = True
-except Exception as exc:  # pragma: no cover - optional dependency in some environments
-    face_recognition = None
-    FACE_RECOGNITION_AVAILABLE = False
-    print(f"Warning: face_recognition not available: {exc}")
-
-try:
     import cv2
     cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
     face_cascade = cv2.CascadeClassifier(cascade_path)
@@ -35,23 +17,6 @@ except Exception as exc:  # pragma: no cover - optional dependency in some envir
     face_cascade = None
     OPENCV_AVAILABLE = False
     print(f"Warning: OpenCV face detection not fully available: {exc}")
-
-
-def _get_insightface_app():
-    global INSIGHTFACE_APP
-    if not INSIGHTFACE_AVAILABLE or FaceAnalysis is None:
-        return None
-    if INSIGHTFACE_APP is not None:
-        return INSIGHTFACE_APP
-    try:
-        app = FaceAnalysis(providers=['CPUExecutionProvider'])
-        app.prepare(ctx_id=0, det_size=(640, 640))
-        INSIGHTFACE_APP = app
-        return app
-    except Exception as exc:  # pragma: no cover - optional dependency in some environments
-        print(f"InsightFace model initialization failed: {exc}")
-        INSIGHTFACE_AVAILABLE = False
-        return None
 
 AZURE_FACE_ENDPOINT = os.getenv("AZURE_FACE_ENDPOINT")
 AZURE_FACE_KEY = os.getenv("AZURE_FACE_KEY")
@@ -99,26 +64,10 @@ def _opencv_face_embedding(image: Image.Image):
 
     x, y, w, h = faces[0]
     face_crop = gray[y:y + h, x:x + w]
-    resized = cv2.resize(face_crop, (32, 32), interpolation=cv2.INTER_AREA)
-    normalized = resized.astype(np.float32) / 255.0
-    vector = normalized.reshape(-1)
-    vector = vector / (np.linalg.norm(vector) + 1e-8)
-    return vector.astype(np.float32)
-
-
-def _insightface_face_embedding(image: Image.Image):
-    model = _get_insightface_app()
-    if model is None:
-        return None
-    try:
-        face = model.get(np.asarray(image))
-        if not face:
-            return None
-        embedding = face[0].embedding.astype(np.float32)
-        return embedding
-    except Exception as exc:  # pragma: no cover - optional dependency in some environments
-        print(f"InsightFace embedding failed: {exc}")
-        return None
+    resized = cv2.resize(face_crop, (64, 64), interpolation=cv2.INTER_AREA)
+    hist = cv2.calcHist([resized], [0], None, [16], [0, 256])
+    hist = cv2.normalize(hist, hist).flatten().astype(np.float32)
+    return hist
 
 
 def get_face_embedding(base64_str):
@@ -135,27 +84,6 @@ def get_face_embedding(base64_str):
     except Exception as exc:
         print(f"Error decoding face image: {exc}")
         return None
-
-    if INSIGHTFACE_AVAILABLE:
-        try:
-            embedding = _insightface_face_embedding(img)
-            if embedding is not None:
-                return embedding
-        except Exception as exc:
-            print(f"InsightFace encoding failed: {exc}")
-
-    if FACE_RECOGNITION_AVAILABLE and face_recognition is not None:
-        try:
-            image_array = np.array(img)
-            face_locations = face_recognition.face_locations(image_array)
-            if not face_locations:
-                return None
-            encodings = face_recognition.face_encodings(image_array, known_face_locations=face_locations)
-            if not encodings:
-                return None
-            return np.asarray(encodings[0], dtype=np.float32)
-        except Exception as exc:
-            print(f"face_recognition encoding failed: {exc}")
 
     if OPENCV_AVAILABLE:
         try:

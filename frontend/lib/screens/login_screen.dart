@@ -67,8 +67,10 @@ class _LoginScreenState extends State<LoginScreen> {
     super.dispose();
   }
 
+  String get _identifierText => _phoneController.text.trim();
+
   bool get _isSendOtpEnabled =>
-      _phoneController.text.length == 10 && _isTermsAccepted;
+      _identifierText.isNotEmpty && _isTermsAccepted;
 
   void _startResendTimer() {
     _resendTimer?.cancel();
@@ -273,18 +275,49 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _triggerSendOtp() async {
+    final identifier = _identifierText;
+    if (identifier.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Please enter your phone number or email."),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     setState(() => _isLoading = true);
 
     try {
-      final fullPhone = "${_selectedCountry.code}${_phoneController.text}";
-      final checkResult = await _apiService.checkUserExists(fullPhone);
-
-      if (checkResult["exists"] == false || checkResult["is_new"] == true) {
-        _isNewUser = true;
+      final checkResult = await _apiService.checkUserExists(identifier);
+      if (checkResult["exists"] == false) {
+        setState(() => _isLoading = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text("No account found for this mobile number or email."),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
       }
 
-      final otpResult =
-          await _apiService.sendOtp(fullPhone, method: _selectedMethod);
+      _isNewUser = false;
+      final otpResult = await _apiService.sendOtp(identifier, method: _selectedMethod);
+
+      if (otpResult.containsKey("message") && otpResult["message"] != null && !otpResult.containsKey("email_success") && !otpResult.containsKey("delivery_status")) {
+        setState(() => _isLoading = false);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(otpResult["message"]),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+        return;
+      }
 
       setState(() {
         _isLoading = false;
@@ -331,8 +364,8 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
 
     try {
-      final fullPhone = "${_selectedCountry.code}${_phoneController.text}";
-      final result = await _apiService.verifyOtp(fullPhone, _otpController.text);
+      final identifier = _identifierText;
+      final result = await _apiService.verifyOtp(identifier, _otpController.text);
       setState(() => _isLoading = false);
 
       if (result["success"] == true || result.containsKey("user_id")) {
@@ -346,7 +379,7 @@ class _LoginScreenState extends State<LoginScreen> {
               context,
               MaterialPageRoute(
                 builder: (context) => FaceRegistrationScreen(
-                  phone: fullPhone,
+                  phone: identifier,
                   userId: userId,
                   userName: userName,
                 ),
