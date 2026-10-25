@@ -17,7 +17,7 @@ class ApiService {
     }
   }
 
-  Future<Map<String, dynamic>> sendOtp(String phone, {String method = "sms"}) async {
+  Future<Map<String, dynamic>> sendOtp(String phone, {String method = "email"}) async {
     try {
       final response = await http.post(
         Uri.parse("$baseUrl/send-otp/$phone?method=$method"),
@@ -142,7 +142,7 @@ class ApiService {
     }
   }
 
-  Future<Map<String, dynamic>> sendHrOtp(int userId, String hrPhone, {String method = "whatsapp"}) async {
+  Future<Map<String, dynamic>> sendHrOtp(int userId, String hrPhone, {String method = "email"}) async {
     try {
       final response = await http.post(
         Uri.parse("$baseUrl/hr/send-otp"),

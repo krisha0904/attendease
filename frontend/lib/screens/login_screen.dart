@@ -43,7 +43,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _isTermsAccepted = false;
   bool _isOtpSent = false;
   bool _isLoading = false;
-  String _selectedMethod = "sms"; // sms or whatsapp
+  String _selectedMethod = "email";
   bool _isNewUser = false;
 
   // OTP Resend Timer State
@@ -213,44 +213,34 @@ class _LoginScreenState extends State<LoginScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    "Verify via OTP",
+                    "Verify via Email OTP",
                     style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    "Select preferred OTP delivery channel for ${_selectedCountry.code} ${_phoneController.text}:",
+                    "A secure one-time code will be sent to the email associated with your account.",
                     style: TextStyle(color: Colors.grey[600]),
                   ),
                   const SizedBox(height: 16),
-                  RadioListTile<String>(
-                    title: const Row(
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.blue.shade200),
+                    ),
+                    child: const Row(
                       children: [
-                        Icon(Icons.sms, color: Colors.blue),
+                        Icon(Icons.email_outlined, color: Colors.blue),
                         SizedBox(width: 10),
-                        Text("SMS Text Message"),
+                        Expanded(
+                          child: Text(
+                            "Delivery method: Email only",
+                            style: TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                        ),
                       ],
                     ),
-                    value: "sms",
-                    groupValue: _selectedMethod,
-                    onChanged: (val) {
-                      setModalState(() => _selectedMethod = val!);
-                      setState(() => _selectedMethod = val!);
-                    },
-                  ),
-                  RadioListTile<String>(
-                    title: const Row(
-                      children: [
-                        Icon(Icons.chat, color: Colors.green),
-                        SizedBox(width: 10),
-                        Text("WhatsApp Notification"),
-                      ],
-                    ),
-                    value: "whatsapp",
-                    groupValue: _selectedMethod,
-                    onChanged: (val) {
-                      setModalState(() => _selectedMethod = val!);
-                      setState(() => _selectedMethod = val!);
-                    },
                   ),
                   const SizedBox(height: 20),
                   ElevatedButton(
@@ -307,7 +297,7 @@ class _LoginScreenState extends State<LoginScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              "OTP code dispatched via ${_selectedMethod.toUpperCase()}! ${otpResult['otp'] != null ? '(Demo OTP: ${otpResult['otp']})' : ''}",
+              "OTP code sent to your registered email. ${otpResult['otp'] != null ? '(Debug OTP: ${otpResult['otp']})' : ''}",
             ),
             backgroundColor: Colors.green,
             duration: const Duration(seconds: 5),

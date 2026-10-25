@@ -23,7 +23,6 @@ class _ResetFaceScreenState extends State<ResetFaceScreen> {
   final _hrOtpController = TextEditingController();
   final _apiService = ApiService();
 
-  String _selectedDeliveryMethod = "whatsapp"; // whatsapp or sms
   bool _isLoading = false;
 
   // Camera State
@@ -46,7 +45,7 @@ class _ResetFaceScreenState extends State<ResetFaceScreen> {
       final res = await _apiService.sendHrOtp(
         widget.userId,
         _hrPhoneController.text,
-        method: _selectedDeliveryMethod,
+        method: "email",
       );
 
       setState(() => _isLoading = false);
@@ -63,7 +62,7 @@ class _ResetFaceScreenState extends State<ResetFaceScreen> {
               ],
             ),
             content: Text(
-              "Security OTP dispatched to HR via ${_selectedDeliveryMethod.toUpperCase()}!\n\n${res['otp'] != null ? '(Demo HR OTP: ${res['otp']})\n\n' : ''}Please contact HR department to obtain the code and proceed with Reset Face ID.",
+              "Security OTP dispatched through the HR verification flow.\n\n${res['otp'] != null ? '(Debug HR OTP: ${res['otp']})\n\n' : ''}Please contact HR department to obtain the code and proceed with Reset Face ID.",
             ),
             actions: [
               ElevatedButton(
@@ -313,26 +312,22 @@ class _ResetFaceScreenState extends State<ResetFaceScreen> {
                   ),
                 ),
                 const SizedBox(height: 15),
-                const Text("Select Delivery Channel:", style: TextStyle(fontWeight: FontWeight.w500)),
-                Row(
-                  children: [
-                    Expanded(
-                      child: RadioListTile<String>(
-                        title: const Text("WhatsApp", style: TextStyle(fontSize: 13)),
-                        value: "whatsapp",
-                        groupValue: _selectedDeliveryMethod,
-                        onChanged: (val) => setState(() => _selectedDeliveryMethod = val!),
-                      ),
-                    ),
-                    Expanded(
-                      child: RadioListTile<String>(
-                        title: const Text("SMS", style: TextStyle(fontSize: 13)),
-                        value: "sms",
-                        groupValue: _selectedDeliveryMethod,
-                        onChanged: (val) => setState(() => _selectedDeliveryMethod = val!),
-                      ),
-                    ),
-                  ],
+                const Text("Delivery Channel:", style: TextStyle(fontWeight: FontWeight.w500)),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withOpacity(0.05),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.blue.shade200),
+                  ),
+                  child: const Row(
+                    children: [
+                      Icon(Icons.email_outlined, color: Colors.blue),
+                      SizedBox(width: 10),
+                      Text("Email-based verification only"),
+                    ],
+                  ),
                 ),
                 const SizedBox(height: 15),
                 ElevatedButton.icon(

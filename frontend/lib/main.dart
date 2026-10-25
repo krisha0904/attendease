@@ -4,7 +4,6 @@ import 'screens/login_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Firebase is removed as we now use our own custom backend for OTP via Twilio
   runApp(const FacultyAttendanceApp());
 }
 

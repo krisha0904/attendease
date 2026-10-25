@@ -35,7 +35,7 @@ class PunchOutRequest(BaseModel):
 class AdminOTPSendRequest(BaseModel):
     user_id: int
     admin_phone: str
-    method: Optional[str] = "whatsapp" # whatsapp or sms
+    method: Optional[str] = "email"
 
 class AdminOTPVerifyRequest(BaseModel):
     user_id: int

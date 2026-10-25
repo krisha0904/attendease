@@ -1,8 +1,21 @@
 import base64
 import io
+import json
+import os
 
 import numpy as np
+import requests
 from PIL import Image
+
+try:
+    from insightface.app import FaceAnalysis
+    INSIGHTFACE_AVAILABLE = True
+    INSIGHTFACE_APP = None
+except Exception as exc:  # pragma: no cover - optional dependency in some environments
+    FaceAnalysis = None
+    INSIGHTFACE_AVAILABLE = False
+    INSIGHTFACE_APP = None
+    print(f"Warning: insightface not available: {exc}")
 
 try:
     import face_recognition
@@ -24,9 +37,53 @@ except Exception as exc:  # pragma: no cover - optional dependency in some envir
     print(f"Warning: OpenCV face detection not fully available: {exc}")
 
 
+def _get_insightface_app():
+    global INSIGHTFACE_APP
+    if not INSIGHTFACE_AVAILABLE or FaceAnalysis is None:
+        return None
+    if INSIGHTFACE_APP is not None:
+        return INSIGHTFACE_APP
+    try:
+        app = FaceAnalysis(providers=['CPUExecutionProvider'])
+        app.prepare(ctx_id=0, det_size=(640, 640))
+        INSIGHTFACE_APP = app
+        return app
+    except Exception as exc:  # pragma: no cover - optional dependency in some environments
+        print(f"InsightFace model initialization failed: {exc}")
+        INSIGHTFACE_AVAILABLE = False
+        return None
+
+AZURE_FACE_ENDPOINT = os.getenv("AZURE_FACE_ENDPOINT")
+AZURE_FACE_KEY = os.getenv("AZURE_FACE_KEY")
+
+
 def _decode_image_from_base64(base64_str: str):
     img_data = base64.b64decode(base64_str.split(',')[-1])
     return Image.open(io.BytesIO(img_data)).convert("RGB")
+
+
+def _azure_face_id(base64_str: str):
+    if not AZURE_FACE_ENDPOINT or not AZURE_FACE_KEY:
+        return None
+
+    try:
+        image_bytes = base64.b64decode(base64_str.split(',')[-1])
+        endpoint = AZURE_FACE_ENDPOINT.rstrip('/')
+        url = f"{endpoint}/face/v1.0/detect?returnFaceId=true&returnFaceLandmarks=false&returnFaceAttributes=emotion"
+        headers = {
+            "Ocp-Apim-Subscription-Key": AZURE_FACE_KEY,
+            "Content-Type": "application/octet-stream",
+        }
+        response = requests.post(url, headers=headers, data=image_bytes, timeout=20)
+        response.raise_for_status()
+        data = response.json()
+        if not data:
+            return None
+        face_id = data[0].get('faceId')
+        return face_id
+    except Exception as exc:
+        print(f"Azure Face API detection failed: {exc}")
+        return None
 
 
 def _opencv_face_embedding(image: Image.Image):
@@ -49,16 +106,43 @@ def _opencv_face_embedding(image: Image.Image):
     return vector.astype(np.float32)
 
 
+def _insightface_face_embedding(image: Image.Image):
+    model = _get_insightface_app()
+    if model is None:
+        return None
+    try:
+        face = model.get(np.asarray(image))
+        if not face:
+            return None
+        embedding = face[0].embedding.astype(np.float32)
+        return embedding
+    except Exception as exc:  # pragma: no cover - optional dependency in some environments
+        print(f"InsightFace embedding failed: {exc}")
+        return None
+
+
 def get_face_embedding(base64_str):
-    """Return a real face embedding when a library is available, otherwise None."""
+    """Return a real face embedding or Azure face ID if cloud credentials are configured."""
     if not base64_str:
         return None
+
+    azure_face_id = _azure_face_id(base64_str)
+    if azure_face_id:
+        return {"provider": "azure", "face_id": azure_face_id}
 
     try:
         img = _decode_image_from_base64(base64_str)
     except Exception as exc:
         print(f"Error decoding face image: {exc}")
         return None
+
+    if INSIGHTFACE_AVAILABLE:
+        try:
+            embedding = _insightface_face_embedding(img)
+            if embedding is not None:
+                return embedding
+        except Exception as exc:
+            print(f"InsightFace encoding failed: {exc}")
 
     if FACE_RECOGNITION_AVAILABLE and face_recognition is not None:
         try:
@@ -85,10 +169,41 @@ def get_face_embedding(base64_str):
 
 
 def verify_faces(stored_embedding, current_embedding, threshold=0.6):
-    """Compare two face embeddings using Euclidean distance."""
+    """Compare two face embeddings or Azure face IDs using the real provider when available."""
     try:
         if stored_embedding is None or current_embedding is None:
             return False
+
+        if isinstance(stored_embedding, str):
+            stored_embedding = json.loads(stored_embedding)
+        if isinstance(current_embedding, str):
+            current_embedding = json.loads(current_embedding)
+
+        if isinstance(stored_embedding, dict) and stored_embedding.get('provider') == 'azure':
+            face_id_1 = stored_embedding.get('face_id')
+            face_id_2 = current_embedding.get('face_id') if isinstance(current_embedding, dict) else None
+            if face_id_1 and face_id_2 and AZURE_FACE_ENDPOINT and AZURE_FACE_KEY:
+                url = f"{AZURE_FACE_ENDPOINT.rstrip('/')}/face/v1.0/verify"
+                payload = {"faceId1": face_id_1, "faceId2": face_id_2}
+                headers = {"Ocp-Apim-Subscription-Key": AZURE_FACE_KEY, "Content-Type": "application/json"}
+                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                if response.status_code == 200:
+                    data = response.json()
+                    return bool(data.get('isIdentical')) and float(data.get('confidence', 0)) >= 0.5
+                raise ValueError(response.text)
+
+        if isinstance(current_embedding, dict) and current_embedding.get('provider') == 'azure':
+            face_id_2 = current_embedding.get('face_id')
+            if isinstance(stored_embedding, dict) and stored_embedding.get('provider') == 'azure':
+                face_id_1 = stored_embedding.get('face_id')
+                if face_id_1 and face_id_2 and AZURE_FACE_ENDPOINT and AZURE_FACE_KEY:
+                    url = f"{AZURE_FACE_ENDPOINT.rstrip('/')}/face/v1.0/verify"
+                    payload = {"faceId1": face_id_1, "faceId2": face_id_2}
+                    headers = {"Ocp-Apim-Subscription-Key": AZURE_FACE_KEY, "Content-Type": "application/json"}
+                    response = requests.post(url, headers=headers, json=payload, timeout=20)
+                    if response.status_code == 200:
+                        data = response.json()
+                        return bool(data.get('isIdentical')) and float(data.get('confidence', 0)) >= 0.5
 
         stored = np.asarray(stored_embedding, dtype=np.float32)
         current = np.asarray(current_embedding, dtype=np.float32)

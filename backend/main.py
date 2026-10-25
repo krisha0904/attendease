@@ -15,18 +15,9 @@ from email.message import EmailMessage
 from database import engine, get_db, SessionLocal
 import uvicorn
 from dotenv import load_dotenv
-try:
-    from twilio.rest import Client
-except ImportError:
-    Client = None
 
 load_dotenv()
 
-# Twilio Configuration
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER")
-TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME")
@@ -158,11 +149,11 @@ def get_events(db: Session = Depends(get_db)):
 def send_admin_otp(req: schemas.AdminOTPSendRequest, db: Session = Depends(get_db)):
     otp = str(random.randint(100000, 999999))
     admin_otp_storage[req.user_id] = otp
-    print(f"\n====================\nADMIN DEBUG OTP: {otp} for User ID {req.user_id} via {req.method}\n====================\n")
+    print(f"\n====================\nADMIN DEBUG OTP: {otp} for User ID {req.user_id} via email\n====================\n")
     return {
         "status": "success",
-        "message": f"OTP sent successfully to Department Admin via {req.method.upper()}",
-        "otp": otp # Provided for demo testing
+        "message": "OTP sent successfully to Department Admin via email",
+        "otp": otp
     }
 
 @app.post("/admin/verify-otp")
@@ -183,7 +174,7 @@ def verify_hr_otp(req: schemas.AdminOTPVerifyRequest, db: Session = Depends(get_
     return verify_admin_otp(req, db)
 
 @app.post("/send-otp/{identifier}")
-def send_otp(identifier: str, method: str = "sms", db: Session = Depends(get_db)):
+def send_otp(identifier: str, method: str = "email", db: Session = Depends(get_db)):
     lookup = identifier.strip()
     lookup_email = lookup.lower() if "@" in lookup else None
 
@@ -193,53 +184,26 @@ def send_otp(identifier: str, method: str = "sms", db: Session = Depends(get_db)
     if not db_user:
         raise HTTPException(status_code=404, detail="Account not found")
 
+    target_email = (lookup_email or lookup).lower()
+    if not db_user.email and not target_email:
+        raise HTTPException(status_code=400, detail="No email is registered for this account")
+    if db_user.email:
+        target_email = db_user.email.lower()
+
     otp = str(random.randint(100000, 999999))
     otp_storage[lookup] = otp
-    if lookup_email:
-        otp_storage[lookup_email] = otp
+    otp_storage[target_email] = otp
 
-    formatted_phone = lookup if lookup.startswith("+") else f"+91{lookup}" if lookup.isdigit() else lookup
-    sms_success = False
-    email_success = False
-    error_msg = ""
+    email_success = send_email_otp(target_email, otp)
 
-    if "@" in lookup:
-        email_success = send_email_otp(lookup_email or lookup, otp)
-    elif Client and TWILIO_ACCOUNT_SID and "ACxxx" not in TWILIO_ACCOUNT_SID:
-        try:
-            client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-            if method == "whatsapp":
-                message = client.messages.create(
-                    from_=f"whatsapp:{TWILIO_WHATSAPP_NUMBER}",
-                    body=f"Your AttendEase verification code is: {otp}",
-                    to=f"whatsapp:{formatted_phone}"
-                )
-            else:
-                message = client.messages.create(
-                    body=f"Your AttendEase verification code is: {otp}",
-                    from_=TWILIO_PHONE_NUMBER,
-                    to=formatted_phone
-                )
-            sms_success = True
-            print(f"Twilio Message Sent: {message.sid}")
-        except Exception as e:
-            error_msg = str(e)
-            print(f"Twilio Error: {e}")
-    else:
-        print(f"\n{'='*20}\nOTP READY FOR SMS: {otp} for {lookup}\n{'='*20}\n")
-
-    channel = "EMAIL" if "@" in lookup else method.upper()
     print(f"\n{'='*20}")
-    print(f"OTP READY: {otp} for {lookup} via {channel}")
-    if error_msg:
-        print(f"DELIVERY FAILED: {error_msg}")
+    print(f"OTP READY: {otp} for {lookup} via email to {target_email}")
     print(f"{'='*20}\n")
 
     payload = {
-        "message": f"OTP sent successfully via {channel.lower()}",
-        "sms_success": sms_success,
+        "message": "OTP sent successfully via email",
         "email_success": email_success,
-        "delivery_status": "email" if "@" in lookup else ("sms" if sms_success else "queued")
+        "delivery_status": "email"
     }
     if DEBUG_OTP:
         payload["otp"] = otp
@@ -281,7 +245,10 @@ def register_face_only(request: schemas.PunchInRequest, db: Session = Depends(ge
 
     embedding = face_service.get_face_embedding(request.face_image_base64)
     if embedding is not None:
-        db_user.face_embedding = json.dumps(embedding.tolist())
+        if isinstance(embedding, dict):
+            db_user.face_embedding = json.dumps(embedding)
+        else:
+            db_user.face_embedding = json.dumps(embedding.tolist())
         db.commit()
         return {"status": "success", "message": "Face profile registered successfully for existing faculty!"}
 
@@ -298,7 +265,10 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     if user.face_image:
         embedding = face_service.get_face_embedding(user.face_image)
         if embedding is not None:
-            embedding_json = json.dumps(embedding.tolist())
+            if isinstance(embedding, dict):
+                embedding_json = json.dumps(embedding)
+            else:
+                embedding_json = json.dumps(embedding.tolist())
 
     # Create user data excluding face_image for the model
     user_data = user.dict()
@@ -322,13 +292,13 @@ def punch_in(punch: schemas.PunchInRequest, db: Session = Depends(get_db)):
     if not db_user.face_embedding:
          raise HTTPException(status_code=400, detail="Face not registered for this user")
 
-    stored_embedding = np.array(json.loads(db_user.face_embedding))
+    stored_value = json.loads(db_user.face_embedding) if db_user.face_embedding else None
     current_embedding = face_service.get_face_embedding(punch.face_image_base64)
 
     if current_embedding is None:
         raise HTTPException(status_code=400, detail="No face detected in photo")
 
-    is_verified = face_service.verify_faces(stored_embedding, current_embedding)
+    is_verified = face_service.verify_faces(stored_value, current_embedding)
 
     if not is_verified:
         raise HTTPException(status_code=401, detail="Face verification failed")

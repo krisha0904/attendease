@@ -8,6 +8,5 @@ opencv-python-headless
 pillow
 pymysql
 python-dotenv
-twilio
-face-recognition
+insightface
 
