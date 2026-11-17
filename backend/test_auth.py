@@ -127,6 +127,38 @@ def test_login_otp_uses_configured_validity_and_respects_resend_cooldown(client,
         assert 119 <= validity_seconds <= 120
 
 
+@pytest.mark.parametrize(
+    ("role", "portal", "wrong_portal"),
+    [
+        (models.UserRole.SUPER_ADMIN, "admin", "user"),
+        (models.UserRole.HOD, "admin", "user"),
+        (models.UserRole.FACULTY, "user", "admin"),
+        (models.UserRole.STAFF, "user", "admin"),
+    ],
+)
+def test_login_otp_is_limited_to_the_correct_portal(client, monkeypatch, role, portal, wrong_portal):
+    test_client, test_sessions = client
+    with test_sessions() as db:
+        _, _, email = create_college(db, f"PORTAL-{role.value}", f"{role.value}@portal.example", role)
+
+    sent_codes = []
+    monkeypatch.setattr(main, "_send_otp_email", lambda recipient, otp, validity_minutes=5: sent_codes.append(otp))
+    requested = test_client.post("/auth/otp/request", json={"email": email})
+    assert requested.status_code == 202
+    payload = {"email": email, "otp": sent_codes[0], "portal": wrong_portal}
+    wrong_login = test_client.post("/auth/otp/verify", json=payload)
+    assert wrong_login.status_code == 403
+    assert wrong_login.json()["detail"] == f"This account must use the {portal} sign-in portal."
+    with test_sessions() as db:
+        assert db.query(models.UserSession).count() == 0
+        assert not db.query(models.OTPVerification).one().is_used
+
+    payload["portal"] = portal
+    correct_login = test_client.post("/auth/otp/verify", json=payload)
+    assert correct_login.status_code == 200
+    assert correct_login.json()["user"]["role"] == role.value
+
+
 def test_otp_validity_policy_is_limited_to_two_through_five_minutes():
     with pytest.raises(ValueError):
         main.AttendancePolicyUpdate(otp_validity_minutes=1)

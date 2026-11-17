@@ -7,13 +7,16 @@ AttendEase is a college attendance web app for visiting faculty and staff. It us
 - Email-verified, college-ID-validated registration for existing colleges, plus email OTP sign-in.
 - Face enrollment with local passive liveness checking and administrator approval.
 - Daily check-in, break start/end, and check-out; punch-in and punch-out require approved face enrollment and live face verification.
+- Separate lecture punch-in/out for recurring timetable entries and approved additional lectures, with live face verification.
+- A user dashboard with current attendance, weekly timetable, monthly attendance hours, and recent notifications; payments are intentionally not shown.
+- Admin-managed weekly timetables and faculty/staff additional-lecture requests with department-scoped approval.
 - Visiting faculty and staff accounts, departments, and working shifts.
 - A searchable college faculty directory with email and phone links.
 - College projects and assigned tasks with due dates, project links, and progress updates.
 - Leave requests, approvals, notifications, and daily attendance CSV reports.
 - Role-based screens for faculty/staff, HODs, and the college administrator.
 
-Class-period timetables and GPS geofencing are not implemented yet. Email delivery requires SMTP configuration. Face liveness runs locally with the bundled MiniFASNet ONNX models; the model has not been independently validated for this application's cameras or deployment and this college project is not production-hardened.
+Workday attendance and per-lecture attendance are recorded separately. Lecture punch-in opens 15 minutes before the scheduled start and closes at the scheduled end; punch-out closes 15 minutes after the scheduled end. Approved additional lectures can also be punched. GPS geofencing is not implemented. Email delivery requires SMTP configuration. Face liveness runs locally with the bundled MiniFASNet ONNX models; the model has not been independently validated for this application's cameras or deployment and this college project is not production-hardened.
 
 ## Prerequisites
 
@@ -109,9 +112,9 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 & 'C:\Program Files\nodejs\npm.cmd' run dev
 ```
 
-Open the local address printed by Vite (usually `http://localhost:5173`) and select **New here? Register**. Colleges and their unique IDs must be provisioned by an administrator before users can register; the registration page only lists active colleges. The user selects a college, enters the College ID supplied by its administrator, and receives an email OTP. The permanent user account is created only after the OTP is verified. Sign in with the registered email; the sign-in code is sent to that email, expires in 2–5 minutes based on the college's policy (five minutes by default), and can be resent once per minute. Complete face enrollment and wait for an administrator to approve it before using punch-in or punch-out.
+Open the local address printed by Vite (usually `http://localhost:5173`). Staff and faculty use `/user/login` (or `/`), where new users can register. Super Admins and HODs use the separate `/admin/login` portal; admin accounts cannot register from the public user portal. The OTP verification endpoint enforces the portal role before creating a session. Colleges and their unique IDs must be provisioned by an administrator before users can register; the registration page only lists active colleges. The user selects a college, enters the College ID supplied by its administrator, and receives an email OTP. The permanent user account is created only after the OTP is verified. Sign in with the registered email; the sign-in code is sent to that email, expires in 2–5 minutes based on the college's policy (five minutes by default), and can be resent once per minute. Complete face enrollment and wait for an administrator to approve it before using punch-in or punch-out.
 
-Share the college code only with people who should join the college. Use **People & setup** to create departments and working shifts, and **Approvals** to review face enrollments. This build records daily attendance rather than timetable-specific class periods.
+Share the college code only with people who should join the college. Use **People & setup** to create departments and working shifts, **Timetable** to assign recurring lectures, and **Approvals** to review face enrollments. Use **Additional lectures** to review extra-class requests. Faculty and staff see their schedule and requests in the user portal. Payments are not included in the user dashboard.
 
 ## Tests
 

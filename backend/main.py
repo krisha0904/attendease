@@ -47,6 +47,7 @@ class OTPRequest(BaseModel):
 class OTPVerification(BaseModel):
     email: EmailStr
     otp: str = Field(pattern=r"^\d{6}$")
+    portal: Literal["admin", "user"] | None = None
     device_info: str | None = Field(default=None, max_length=500)
 
 
@@ -128,6 +129,43 @@ class TaskUpdate(BaseModel):
         return self
 
 
+class WeeklyLectureCreate(BaseModel):
+    user_id: int = Field(gt=0)
+    department_id: int | None = Field(default=None, gt=0)
+    subject: str = Field(min_length=1, max_length=200)
+    course_name: str | None = Field(default=None, max_length=200)
+    day_of_week: int = Field(ge=0, le=6)
+    start_time: time_type
+    end_time: time_type
+    room: str | None = Field(default=None, max_length=100)
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        if self.end_time <= self.start_time:
+            raise ValueError("Lecture end time must be after its start time.")
+        return self
+
+
+class AdditionalLectureCreate(BaseModel):
+    lecture_date: date
+    subject: str = Field(min_length=1, max_length=200)
+    start_time: time_type
+    end_time: time_type
+    room: str | None = Field(default=None, max_length=100)
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        if self.end_time <= self.start_time:
+            raise ValueError("Lecture end time must be after its start time.")
+        return self
+
+
+class AdditionalLectureReview(BaseModel):
+    approved: bool
+    remarks: str | None = Field(default=None, max_length=2000)
+
+
 class DepartmentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     code: str | None = Field(default=None, max_length=50)
@@ -177,6 +215,23 @@ class AttendanceActionRequest(BaseModel):
                 raise ValueError("The face image must be one of the liveness frames.")
         if (self.latitude is None) != (self.longitude is None):
             raise ValueError("Latitude and longitude must be supplied together.")
+        return self
+
+
+class LectureAttendanceActionRequest(BaseModel):
+    source_type: Literal["weekly", "additional"]
+    schedule_id: int = Field(gt=0)
+    lecture_date: date
+    challenge_token: str = Field(min_length=32, max_length=100)
+    frames: list[str] = Field(min_length=4, max_length=12)
+    face_image_base64: str = Field(min_length=100, max_length=7_000_000)
+    idempotency_key: str = Field(min_length=16, max_length=80)
+
+    @model_validator(mode="after")
+    def face_image_in_liveness_sequence(self):
+        _validate_capture_frames(self.frames)
+        if self.face_image_base64 not in self.frames:
+            raise ValueError("The face image must be one of the liveness frames.")
         return self
 
 
@@ -697,6 +752,59 @@ def _attendance_payload(record: models.AttendanceRecord) -> dict:
     }
 
 
+def _weekly_lecture_payload(lecture: models.WeeklyLecture) -> dict:
+    return {
+        "id": lecture.id,
+        "user_id": lecture.user_id,
+        "user_name": lecture.user.full_name,
+        "employee_id": lecture.user.employee_id,
+        "department_id": lecture.department_id,
+        "department": lecture.department.name if lecture.department else None,
+        "subject": lecture.subject,
+        "course_name": lecture.course_name,
+        "day_of_week": lecture.day_of_week,
+        "start_time": lecture.start_time.strftime("%H:%M"),
+        "end_time": lecture.end_time.strftime("%H:%M"),
+        "room": lecture.room,
+        "is_active": lecture.is_active,
+    }
+
+
+def _additional_lecture_payload(item: models.AdditionalLectureRequest) -> dict:
+    return {
+        "id": item.id,
+        "user_id": item.user_id,
+        "user_name": item.user.full_name,
+        "employee_id": item.user.employee_id,
+        "department_id": item.user.department_id,
+        "department": item.user.department.name if item.user.department else None,
+        "lecture_date": item.lecture_date,
+        "subject": item.subject,
+        "start_time": item.start_time.strftime("%H:%M"),
+        "end_time": item.end_time.strftime("%H:%M"),
+        "room": item.room,
+        "reason": item.reason,
+        "status": item.status,
+        "reviewed_at": item.reviewed_at,
+        "review_remarks": item.review_remarks,
+        "created_at": item.created_at,
+    }
+
+
+def _lecture_attendance_payload(record: models.LectureAttendanceRecord) -> dict:
+    return {
+        "id": record.id,
+        "source_type": "weekly" if record.weekly_lecture_id is not None else "additional",
+        "schedule_id": record.weekly_lecture_id or record.additional_lecture_request_id,
+        "lecture_date": record.lecture_date,
+        "punch_in_time": record.punch_in_time,
+        "punch_out_time": record.punch_out_time,
+        "status": "completed" if record.punch_out_time else "in_progress",
+        "punch_in_face_verified": bool(record.punch_in_face_verified),
+        "punch_out_face_verified": bool(record.punch_out_face_verified),
+    }
+
+
 def _count_leave_days(
     db: Session,
     college_id: int,
@@ -1213,6 +1321,17 @@ def create_app() -> FastAPI:
                 record.is_used = True
             db.commit()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
+
+        if payload.portal == "admin" and user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account must use the user sign-in portal.",
+            )
+        if payload.portal == "user" and user.role in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account must use the admin sign-in portal.",
+            )
 
         record.is_used = True
         tokens = _issue_session(user, request, db, payload.device_info)
@@ -2544,7 +2663,8 @@ def create_app() -> FastAPI:
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        today = _attendance_now().date()
+        now = _attendance_now()
+        today = now.date()
         record = (
             db.query(models.AttendanceRecord)
             .filter(
@@ -2574,11 +2694,681 @@ def create_app() -> FastAPI:
             .limit(7)
             .all()
         )
+        weekly_lectures = (
+            db.query(models.WeeklyLecture)
+            .filter(
+                models.WeeklyLecture.user_id == user.id,
+                models.WeeklyLecture.college_id == user.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+            )
+            .order_by(models.WeeklyLecture.day_of_week, models.WeeklyLecture.start_time)
+            .all()
+        )
+        today_lectures = [item for item in weekly_lectures if item.day_of_week == today.weekday()]
+        lectures_by_weekday = {
+            weekday: sum(item.day_of_week == weekday for item in weekly_lectures)
+            for weekday in range(7)
+        }
+        month_start = today.replace(day=1)
+        month_records = (
+            db.query(models.AttendanceRecord)
+            .filter(
+                models.AttendanceRecord.user_id == user.id,
+                models.AttendanceRecord.college_id == user.college_id,
+                models.AttendanceRecord.date >= month_start,
+                models.AttendanceRecord.date <= today,
+            )
+            .all()
+        )
+
+        month_starts = []
+        month_cursor = month_start
+        for _ in range(6):
+            month_starts.insert(0, month_cursor)
+            month_cursor = (
+                month_cursor.replace(year=month_cursor.year - 1, month=12)
+                if month_cursor.month == 1
+                else month_cursor.replace(month=month_cursor.month - 1)
+            )
+        six_month_records = (
+            db.query(models.AttendanceRecord)
+            .filter(
+                models.AttendanceRecord.user_id == user.id,
+                models.AttendanceRecord.college_id == user.college_id,
+                models.AttendanceRecord.date >= month_starts[0],
+                models.AttendanceRecord.date <= today,
+            )
+            .all()
+        )
+        attendance_minutes_by_month: dict[str, int] = {item.isoformat(): 0 for item in month_starts}
+        for attendance in six_month_records:
+            month_key = attendance.date.replace(day=1).isoformat()
+            attendance_minutes_by_month[month_key] = (
+                attendance_minutes_by_month.get(month_key, 0) + (attendance.net_working_minutes or 0)
+            )
+        scheduled_lectures_this_month = 0
+        day_cursor = month_start
+        while day_cursor.month == today.month and day_cursor.year == today.year:
+            scheduled_lectures_this_month += lectures_by_weekday[day_cursor.weekday()]
+            day_cursor += timedelta(days=1)
+        unread_notifications = db.query(models.Notification).filter(
+            models.Notification.user_id == user.id,
+            models.Notification.college_id == user.college_id,
+            models.Notification.is_read.is_(False),
+        ).count()
+        recent_notifications = (
+            db.query(models.Notification)
+            .filter(
+                models.Notification.user_id == user.id,
+                models.Notification.college_id == user.college_id,
+            )
+            .order_by(models.Notification.created_at.desc())
+            .limit(3)
+            .all()
+        )
+        pending_additional_lectures = db.query(models.AdditionalLectureRequest).filter(
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.status == "pending",
+        ).count()
         return {
             "user": _user_payload(user),
+            "college": {
+                "name": user.college.name,
+                "code": user.college.code,
+                "department": user.department.name if user.department else None,
+            },
             "today": _attendance_payload(record) if record else None,
             "recent": [_attendance_payload(item) for item in recent],
+            "today_schedule": [_weekly_lecture_payload(item) for item in today_lectures],
+            "monthly": {
+                "month": month_start.isoformat(),
+                "hours_worked": round(
+                    sum(item.net_working_minutes or 0 for item in month_records) / 60,
+                    1,
+                ),
+                "completed_days": sum(item.punch_out_time is not None for item in month_records),
+                "scheduled_lectures": scheduled_lectures_this_month,
+                "hours_by_month": [
+                    {
+                        "month": item.isoformat(),
+                        "hours": round(attendance_minutes_by_month[item.isoformat()] / 60, 1),
+                    }
+                    for item in month_starts
+                ],
+            },
+            "unread_notifications": unread_notifications,
+            "recent_notifications": [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "message": item.message,
+                    "type": item.type,
+                    "is_read": item.is_read,
+                    "created_at": item.created_at,
+                }
+                for item in recent_notifications
+            ],
+            "pending_additional_lectures": pending_additional_lectures,
         }
+
+    @app.get("/timetable/mine")
+    def my_timetable(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        lectures = (
+            db.query(models.WeeklyLecture)
+            .filter(
+                models.WeeklyLecture.user_id == user.id,
+                models.WeeklyLecture.college_id == user.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+            )
+            .order_by(models.WeeklyLecture.day_of_week, models.WeeklyLecture.start_time)
+            .all()
+        )
+        return [_weekly_lecture_payload(item) for item in lectures]
+
+    @app.get("/lecture-attendance/mine")
+    def my_lecture_attendance(
+        lecture_date: date,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.FACULTY, models.UserRole.STAFF):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only faculty and staff have lecture attendance.")
+
+        weekly_lectures = (
+            db.query(models.WeeklyLecture)
+            .filter(
+                models.WeeklyLecture.user_id == user.id,
+                models.WeeklyLecture.college_id == user.college_id,
+                models.WeeklyLecture.day_of_week == lecture_date.weekday(),
+                models.WeeklyLecture.is_active.is_(True),
+            )
+            .all()
+        )
+        additional_lectures = (
+            db.query(models.AdditionalLectureRequest)
+            .filter(
+                models.AdditionalLectureRequest.user_id == user.id,
+                models.AdditionalLectureRequest.college_id == user.college_id,
+                models.AdditionalLectureRequest.lecture_date == lecture_date,
+                models.AdditionalLectureRequest.status == "approved",
+            )
+            .all()
+        )
+        records = (
+            db.query(models.LectureAttendanceRecord)
+            .filter(
+                models.LectureAttendanceRecord.user_id == user.id,
+                models.LectureAttendanceRecord.college_id == user.college_id,
+                models.LectureAttendanceRecord.lecture_date == lecture_date,
+            )
+            .all()
+        )
+        weekly_records = {item.weekly_lecture_id: item for item in records if item.weekly_lecture_id is not None}
+        additional_records = {
+            item.additional_lecture_request_id: item
+            for item in records
+            if item.additional_lecture_request_id is not None
+        }
+        now = _attendance_now()
+
+        def occurrence_payload(
+            source_type: str,
+            schedule_id: int,
+            subject: str,
+            course_name: str | None,
+            department: str | None,
+            room: str | None,
+            start_time: time_type,
+            end_time: time_type,
+            record: models.LectureAttendanceRecord | None,
+        ) -> dict:
+            starts_at = datetime.combine(lecture_date, start_time)
+            ends_at = datetime.combine(lecture_date, end_time)
+            is_today = lecture_date == now.date()
+            can_punch_in = bool(
+                is_today
+                and (record is None or record.punch_in_time is None)
+                and starts_at - timedelta(minutes=15) <= now <= ends_at
+            )
+            can_punch_out = bool(
+                is_today
+                and record is not None
+                and record.punch_in_time is not None
+                and record.punch_out_time is None
+                and record.punch_in_time <= now <= ends_at + timedelta(minutes=15)
+            )
+            if record and record.punch_out_time:
+                attendance_status = "completed"
+            elif record and record.punch_in_time:
+                attendance_status = "in_progress"
+            elif starts_at > now:
+                attendance_status = "upcoming"
+            elif now > ends_at:
+                attendance_status = "missed"
+            else:
+                attendance_status = "scheduled"
+            return {
+                "source_type": source_type,
+                "schedule_id": schedule_id,
+                "lecture_date": lecture_date,
+                "subject": subject,
+                "course_name": course_name,
+                "department": department,
+                "room": room,
+                "start_time": start_time.strftime("%H:%M"),
+                "end_time": end_time.strftime("%H:%M"),
+                "status": attendance_status,
+                "punch_in_time": record.punch_in_time if record else None,
+                "punch_out_time": record.punch_out_time if record else None,
+                "can_punch_in": can_punch_in,
+                "can_punch_out": can_punch_out,
+                "punch_out_window_closed": bool(
+                    record
+                    and record.punch_in_time
+                    and record.punch_out_time is None
+                    and (
+                        lecture_date < now.date()
+                        or is_today and now > ends_at + timedelta(minutes=15)
+                    )
+                ),
+            }
+
+        occurrences = [
+            occurrence_payload(
+                "weekly",
+                lecture.id,
+                lecture.subject,
+                lecture.course_name,
+                lecture.department.name if lecture.department else None,
+                lecture.room,
+                lecture.start_time,
+                lecture.end_time,
+                weekly_records.get(lecture.id),
+            )
+            for lecture in weekly_lectures
+        ]
+        occurrences.extend(
+            occurrence_payload(
+                "additional",
+                lecture.id,
+                lecture.subject,
+                None,
+                user.department.name if user.department else None,
+                lecture.room,
+                lecture.start_time,
+                lecture.end_time,
+                additional_records.get(lecture.id),
+            )
+            for lecture in additional_lectures
+        )
+        return sorted(occurrences, key=lambda item: item["start_time"])
+
+    @app.post("/lecture-attendance/{action}")
+    def perform_lecture_attendance_action(
+        action: Literal["punch_in", "punch_out"],
+        payload: LectureAttendanceActionRequest,
+        request: Request,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.FACULTY, models.UserRole.STAFF):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only faculty and staff can record lecture attendance.")
+
+        existing_event = (
+            db.query(models.LectureAttendanceEvent)
+            .filter(
+                models.LectureAttendanceEvent.user_id == user.id,
+                models.LectureAttendanceEvent.idempotency_key == payload.idempotency_key,
+            )
+            .first()
+        )
+        if existing_event is not None:
+            existing_record = db.query(models.LectureAttendanceRecord).filter(
+                models.LectureAttendanceRecord.id == existing_event.attendance_id
+            ).first()
+            record_matches_request = existing_record is not None and (
+                existing_record.weekly_lecture_id == payload.schedule_id
+                if payload.source_type == "weekly"
+                else existing_record.additional_lecture_request_id == payload.schedule_id
+            )
+            if existing_event.event_type != action or not record_matches_request or existing_record.lecture_date != payload.lecture_date:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Idempotency key was already used for another lecture action.")
+            return _lecture_attendance_payload(existing_record)
+
+        if payload.source_type == "weekly":
+            lecture = db.query(models.WeeklyLecture).filter(
+                models.WeeklyLecture.id == payload.schedule_id,
+                models.WeeklyLecture.user_id == user.id,
+                models.WeeklyLecture.college_id == user.college_id,
+                models.WeeklyLecture.day_of_week == payload.lecture_date.weekday(),
+                models.WeeklyLecture.is_active.is_(True),
+            ).first()
+            if lecture is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled lecture not found.")
+            start_time = lecture.start_time
+            end_time = lecture.end_time
+            weekly_lecture_id = lecture.id
+            additional_lecture_request_id = None
+        else:
+            lecture = db.query(models.AdditionalLectureRequest).filter(
+                models.AdditionalLectureRequest.id == payload.schedule_id,
+                models.AdditionalLectureRequest.user_id == user.id,
+                models.AdditionalLectureRequest.college_id == user.college_id,
+                models.AdditionalLectureRequest.lecture_date == payload.lecture_date,
+                models.AdditionalLectureRequest.status == "approved",
+            ).first()
+            if lecture is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Approved additional lecture not found.")
+            start_time = lecture.start_time
+            end_time = lecture.end_time
+            weekly_lecture_id = None
+            additional_lecture_request_id = lecture.id
+
+        record_query = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.user_id == user.id,
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.lecture_date == payload.lecture_date,
+        )
+        if payload.source_type == "weekly":
+            record_query = record_query.filter(
+                models.LectureAttendanceRecord.weekly_lecture_id == payload.schedule_id
+            )
+        else:
+            record_query = record_query.filter(
+                models.LectureAttendanceRecord.additional_lecture_request_id == payload.schedule_id
+            )
+
+        start_at = datetime.combine(payload.lecture_date, start_time)
+        end_at = datetime.combine(payload.lecture_date, end_time)
+
+        def validate_action_window(
+            now: datetime,
+            record: models.LectureAttendanceRecord | None,
+        ) -> None:
+            if payload.lecture_date != now.date():
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lecture punches are only allowed on the scheduled day.")
+            if action == "punch_in":
+                if record and record.punch_in_time is not None:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You have already punched in to this lecture.")
+                if now < start_at - timedelta(minutes=15):
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lecture punch-in opens 15 minutes before the scheduled start.")
+                if now > end_at:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The lecture punch-in window has closed.")
+            else:
+                if record is None or record.punch_in_time is None or record.punch_out_time is not None:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Punch in to this lecture before punching out.")
+                if now < record.punch_in_time:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lecture punch-out must follow punch-in.")
+                if now > end_at + timedelta(minutes=15):
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The lecture punch-out window closed 15 minutes after its scheduled end.")
+
+        record = record_query.with_for_update().first()
+        validate_action_window(_attendance_now(), record)
+        face_verified, _, _, _ = _verify_face(
+            db,
+            user,
+            action,
+            payload.challenge_token,
+            payload.frames,
+            payload.face_image_base64,
+            request,
+        )
+
+        now = _attendance_now()
+        record = record_query.with_for_update().first()
+        validate_action_window(now, record)
+        if record is None:
+            record = models.LectureAttendanceRecord(
+                college_id=user.college_id,
+                user_id=user.id,
+                weekly_lecture_id=weekly_lecture_id,
+                additional_lecture_request_id=additional_lecture_request_id,
+                lecture_date=payload.lecture_date,
+            )
+            db.add(record)
+            db.flush()
+        if action == "punch_in":
+            record.punch_in_time = now
+            record.punch_in_face_verified = face_verified
+        else:
+            record.punch_out_time = now
+            record.punch_out_face_verified = face_verified
+        db.add(
+            models.LectureAttendanceEvent(
+                attendance_id=record.id,
+                user_id=user.id,
+                event_type=action,
+                event_time=now,
+                face_verified=face_verified,
+                idempotency_key=payload.idempotency_key,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Lecture attendance conflicts with another request; refresh and try again.",
+            ) from exc
+        db.refresh(record)
+        return _lecture_attendance_payload(record)
+
+    @app.get("/admin/timetable")
+    def list_timetable(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.WeeklyLecture.department_id == admin.department_id)
+        lectures = query.order_by(
+            models.WeeklyLecture.day_of_week,
+            models.WeeklyLecture.start_time,
+            models.WeeklyLecture.user_id,
+        ).all()
+        return [_weekly_lecture_payload(item) for item in lectures]
+
+    @app.post("/admin/timetable", status_code=status.HTTP_201_CREATED)
+    def create_timetable_entry(
+        payload: WeeklyLectureCreate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        teacher = db.query(models.User).filter(
+            models.User.id == payload.user_id,
+            models.User.college_id == admin.college_id,
+            models.User.is_active.is_(True),
+            models.User.role.in_((models.UserRole.FACULTY, models.UserRole.STAFF)),
+        ).first()
+        if teacher is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active faculty or staff member not found.")
+        if admin.role == models.UserRole.HOD and teacher.department_id != admin.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only schedule your own department.")
+        department_id = payload.department_id if payload.department_id is not None else teacher.department_id
+        if department_id is not None:
+            department = db.query(models.Department).filter(
+                models.Department.id == department_id,
+                models.Department.college_id == admin.college_id,
+                models.Department.is_active.is_(True),
+            ).first()
+            if department is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found.")
+            if teacher.department_id != department_id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The teacher must belong to the selected department.")
+        collision = db.query(models.WeeklyLecture.id).filter(
+            models.WeeklyLecture.user_id == teacher.id,
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.day_of_week == payload.day_of_week,
+            models.WeeklyLecture.is_active.is_(True),
+            models.WeeklyLecture.start_time < payload.end_time,
+            models.WeeklyLecture.end_time > payload.start_time,
+        ).first()
+        if collision:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This schedule overlaps another lecture for the selected faculty member.")
+        lecture = models.WeeklyLecture(
+            college_id=admin.college_id,
+            department_id=department_id,
+            user_id=teacher.id,
+            subject=payload.subject.strip(),
+            course_name=payload.course_name.strip() if payload.course_name else None,
+            day_of_week=payload.day_of_week,
+            start_time=payload.start_time,
+            end_time=payload.end_time,
+            room=payload.room.strip() if payload.room else None,
+            is_active=True,
+            created_by=admin.id,
+        )
+        db.add(lecture)
+        db.commit()
+        db.refresh(lecture)
+        return _weekly_lecture_payload(lecture)
+
+    @app.delete("/admin/timetable/{lecture_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_timetable_entry(
+        lecture_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        lecture = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.id == lecture_id,
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        ).first()
+        if lecture is None or (
+            admin.role == models.UserRole.HOD and lecture.department_id != admin.department_id
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Timetable entry not found.")
+        lecture.is_active = False
+        db.commit()
+
+    @app.get("/additional-lectures/mine")
+    def list_my_additional_lectures(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        requests = (
+            db.query(models.AdditionalLectureRequest)
+            .filter(
+                models.AdditionalLectureRequest.user_id == user.id,
+                models.AdditionalLectureRequest.college_id == user.college_id,
+            )
+            .order_by(models.AdditionalLectureRequest.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        return [_additional_lecture_payload(item) for item in requests]
+
+    @app.post("/additional-lectures", status_code=status.HTTP_201_CREATED)
+    def create_additional_lecture_request(
+        payload: AdditionalLectureCreate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.FACULTY, models.UserRole.STAFF):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only faculty and staff can request an additional lecture.")
+        if payload.lecture_date < _attendance_now().date():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Additional lectures must be requested for today or a future date.")
+        weekly_conflict = db.query(models.WeeklyLecture.id).filter(
+            models.WeeklyLecture.user_id == user.id,
+            models.WeeklyLecture.college_id == user.college_id,
+            models.WeeklyLecture.day_of_week == payload.lecture_date.weekday(),
+            models.WeeklyLecture.is_active.is_(True),
+            models.WeeklyLecture.start_time < payload.end_time,
+            models.WeeklyLecture.end_time > payload.start_time,
+        ).first()
+        request_conflict = db.query(models.AdditionalLectureRequest.id).filter(
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.lecture_date == payload.lecture_date,
+            models.AdditionalLectureRequest.status.in_(("pending", "approved")),
+            models.AdditionalLectureRequest.start_time < payload.end_time,
+            models.AdditionalLectureRequest.end_time > payload.start_time,
+        ).first()
+        if weekly_conflict or request_conflict:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This additional lecture overlaps an existing or requested lecture.")
+        request = models.AdditionalLectureRequest(
+            college_id=user.college_id,
+            user_id=user.id,
+            lecture_date=payload.lecture_date,
+            subject=payload.subject.strip(),
+            start_time=payload.start_time,
+            end_time=payload.end_time,
+            room=payload.room.strip() if payload.room else None,
+            reason=payload.reason.strip(),
+            status="pending",
+        )
+        db.add(request)
+        db.flush()
+        reviewers = db.query(models.User).filter(
+            models.User.college_id == user.college_id,
+            models.User.is_active.is_(True),
+            models.User.role == models.UserRole.SUPER_ADMIN,
+        )
+        if user.department_id is not None:
+            reviewers = reviewers.union(
+                db.query(models.User).filter(
+                    models.User.college_id == user.college_id,
+                    models.User.department_id == user.department_id,
+                    models.User.role == models.UserRole.HOD,
+                    models.User.is_active.is_(True),
+                )
+            )
+        for reviewer in reviewers.all():
+            db.add(models.Notification(
+                user_id=reviewer.id,
+                college_id=user.college_id,
+                title="Additional lecture request",
+                message=f"{user.full_name} requested an additional lecture for {payload.lecture_date.isoformat()}.",
+                type="info",
+                action_url="/admin/approvals",
+            ))
+        db.commit()
+        db.refresh(request)
+        return _additional_lecture_payload(request)
+
+    @app.get("/admin/additional-lectures")
+    def list_additional_lecture_requests(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.AdditionalLectureRequest).join(
+            models.User, models.User.id == models.AdditionalLectureRequest.user_id
+        ).filter(models.AdditionalLectureRequest.college_id == admin.college_id)
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == admin.department_id)
+        requests = query.order_by(
+            models.AdditionalLectureRequest.created_at.desc()
+        ).limit(500).all()
+        return [_additional_lecture_payload(item) for item in requests]
+
+    @app.post("/admin/additional-lectures/{request_id}/review")
+    def review_additional_lecture_request(
+        request_id: int,
+        payload: AdditionalLectureReview,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        request = (
+            db.query(models.AdditionalLectureRequest)
+            .join(models.User, models.User.id == models.AdditionalLectureRequest.user_id)
+            .filter(
+                models.AdditionalLectureRequest.id == request_id,
+                models.AdditionalLectureRequest.college_id == admin.college_id,
+                models.AdditionalLectureRequest.status == "pending",
+            )
+            .with_for_update()
+            .first()
+        )
+        if request is None or request.user_id == admin.id or (
+            admin.role == models.UserRole.HOD and request.user.department_id != admin.department_id
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending additional lecture request not found.")
+        if payload.approved:
+            weekly_conflict = db.query(models.WeeklyLecture.id).filter(
+                models.WeeklyLecture.user_id == request.user_id,
+                models.WeeklyLecture.college_id == request.college_id,
+                models.WeeklyLecture.day_of_week == request.lecture_date.weekday(),
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.start_time < request.end_time,
+                models.WeeklyLecture.end_time > request.start_time,
+            ).first()
+            request_conflict = db.query(models.AdditionalLectureRequest.id).filter(
+                models.AdditionalLectureRequest.id != request.id,
+                models.AdditionalLectureRequest.user_id == request.user_id,
+                models.AdditionalLectureRequest.college_id == request.college_id,
+                models.AdditionalLectureRequest.lecture_date == request.lecture_date,
+                models.AdditionalLectureRequest.status == "approved",
+                models.AdditionalLectureRequest.start_time < request.end_time,
+                models.AdditionalLectureRequest.end_time > request.start_time,
+            ).first()
+            if weekly_conflict or request_conflict:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This request now overlaps another scheduled lecture.")
+        request.status = "approved" if payload.approved else "rejected"
+        request.reviewed_by = admin.id
+        request.reviewed_at = _utcnow()
+        request.review_remarks = payload.remarks.strip() if payload.remarks else None
+        db.add(models.Notification(
+            user_id=request.user_id,
+            college_id=request.college_id,
+            title=f"Additional lecture request {request.status}",
+            message=(
+                f"Your request for {request.lecture_date.isoformat()} was {request.status}."
+                + (f" {request.review_remarks}" if request.review_remarks else "")
+            ),
+            type="success" if payload.approved else "warning",
+            action_url="/user/additional-lectures",
+        ))
+        db.commit()
+        return {"id": request.id, "status": request.status}
 
     @app.get("/admin/attendance")
     def attendance_report(

@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
 import {
   Activity, ArrowDownToLine, Bell, Building2, CalendarDays, Camera, Check, ChevronRight,
-  CircleHelp, Clock3, Fingerprint, FolderOpen, LayoutDashboard, ListChecks, LogOut, Menu,
-  ShieldCheck, Users, X,
+  BookOpen, CalendarPlus, CircleHelp, Clock3, Fingerprint, FolderOpen, GraduationCap,
+  KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserRound, Users, X,
 } from 'lucide-react'
 import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens } from './api'
 import { useClock, useReloadable } from './hooks'
 
 type Role = 'super_admin' | 'hod' | 'faculty' | 'staff'
+type Portal = 'admin' | 'user'
 type User = {
   id: number
   employee_id: string
@@ -44,20 +45,91 @@ type Policy = {
 }
 type Challenge = { challenge_token: string; instruction: string }
 type CollegeOption = { id: number; name: string }
+type WeeklyLecture = {
+  id: number
+  user_id: number
+  user_name: string
+  employee_id: string
+  department_id: number | null
+  department: string | null
+  subject: string
+  course_name: string | null
+  day_of_week: number
+  start_time: string
+  end_time: string
+  room: string | null
+  is_active: boolean
+}
+type LectureScheduleItem = {
+  source_type: 'weekly' | 'additional'
+  schedule_id: number
+  lecture_date: string
+  subject: string
+  course_name: string | null
+  department: string | null
+  room: string | null
+  start_time: string
+  end_time: string
+  status: 'completed' | 'in_progress' | 'upcoming' | 'scheduled' | 'missed'
+  punch_in_time: string | null
+  punch_out_time: string | null
+  can_punch_in: boolean
+  can_punch_out: boolean
+  punch_out_window_closed: boolean
+}
+type DashboardData = {
+  user: User
+  college: { name: string; code: string; department: string | null }
+  today: Attendance | null
+  recent: Attendance[]
+  today_schedule: WeeklyLecture[]
+  monthly: {
+    month: string
+    hours_worked: number
+    completed_days: number
+    scheduled_lectures: number
+    hours_by_month: Array<{ month: string; hours: number }>
+  }
+  unread_notifications: number
+  recent_notifications: Array<{ id: number; title: string; message: string; type: string; is_read: boolean; created_at: string }>
+  pending_additional_lectures: number
+}
+type AdditionalLectureRequest = {
+  id: number
+  user_id: number
+  user_name: string
+  employee_id: string
+  department_id: number | null
+  department: string | null
+  lecture_date: string
+  subject: string
+  start_time: string
+  end_time: string
+  room: string | null
+  reason: string
+  status: string
+  reviewed_at: string | null
+  review_remarks: string | null
+  created_at: string
+}
 type NavItem = { key: string; label: string; icon: typeof LayoutDashboard }
 
 const staffNavigation: NavItem[] = [
-  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { key: 'attendance', label: 'Attendance', icon: Clock3 },
+  { key: 'Dasboard ', label: 'Dasboard ', icon: LayoutDashboard },
+  { key: 'timetable', label: 'Timetable', icon: CalendarDays },
+  { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
+  { key: 'leave', label: 'Leave requests', icon: CalendarDays },
+  { key: 'notifications', label: 'Notifications', icon: Bell },
+  { key: 'profile', label: 'Profile & Settings', icon: Settings },
   { key: 'enrollment', label: 'Face verification', icon: Fingerprint },
   { key: 'tasks', label: 'My tasks', icon: ListChecks },
   { key: 'projects', label: 'Projects', icon: FolderOpen },
-  { key: 'leave', label: 'Leave', icon: CalendarDays },
   { key: 'directory', label: 'Faculty directory', icon: Users },
-  { key: 'notifications', label: 'Notifications', icon: Bell },
 ]
 const managerNavigation: NavItem[] = [
-  { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { key: 'Dasboard ', label: 'Dasboard ', icon: LayoutDashboard },
+  { key: 'timetable', label: 'Timetable', icon: CalendarDays },
+  { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
   { key: 'attendance', label: 'Attendance', icon: Clock3 },
   { key: 'enrollment', label: 'Face verification', icon: Fingerprint },
   { key: 'tasks', label: 'Tasks', icon: ListChecks },
@@ -77,9 +149,28 @@ function isManager(role: Role) {
   return role === 'super_admin' || role === 'hod'
 }
 
+function portalForRole(role: Role): Portal {
+  return isManager(role) ? 'admin' : 'user'
+}
+
+function portalFromPath(pathname: string): Portal {
+  return pathname === '/admin' || pathname.startsWith('/admin/') ? 'admin' : 'user'
+}
+
+function loginPath(portal: Portal) {
+  return portal === 'admin' ? '/admin/login' : '/user/login'
+}
+
 function localDate() {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+}
+
+function dateForCurrentWeekday(dayIndex: number) {
+  const date = new Date()
+  const todayIndex = (date.getDay() + 6) % 7
+  date.setDate(date.getDate() - todayIndex + dayIndex)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
 
 function formatDay(value: string) {
@@ -99,7 +190,7 @@ function statusLabel(status?: string | null) {
   return (status || 'not started').replaceAll('_', ' ')
 }
 
-function Login({ onLogin }: { onLogin: (user: User) => void }) {
+function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => void }) {
   const [mode, setMode] = useState<'login' | 'login-verify' | 'register' | 'verify'>('login')
   const [fullName, setFullName] = useState('')
   const [employeeId, setEmployeeId] = useState('')
@@ -192,9 +283,14 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
     setBusy(true)
     setError('')
     try {
-      const { data } = await api.post('/auth/otp/verify', { email, otp: verificationCode })
+      const { data } = await api.post('/auth/otp/verify', { email, otp: verificationCode, portal })
+      const signedInUser = data.user as User
+      if (portalForRole(signedInUser.role) !== portal) {
+        setError(`This account must use the ${portalForRole(signedInUser.role)} sign-in portal.`)
+        return
+      }
       saveTokens(data.access_token, data.refresh_token)
-      onLogin(data.user as User)
+      onLogin(signedInUser)
     } catch (requestError) {
       setError(errorMessage(requestError))
     } finally {
@@ -295,23 +391,23 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
   const isVerifying = isVerifyingLogin || isVerifyingEmail
 
   return (
-    <main className="login-page">
+    <main className={`login-page ${portal === 'admin' ? 'login-admin' : 'login-user'}`}>
       <div className="login-art">
         <div className="brand brand-light"><span className="brand-mark"><Activity size={21} /></span> AttendEase</div>
         <div className="login-art-copy">
-          <div className="eyebrow">COLLEGE ATTENDANCE, SIMPLIFIED</div>
-          <h1>Every day,<br />accounted for.</h1>
-          <p>Attendance, people, projects, and tasks for your college team.</p>
+          <div className="eyebrow">{portal === 'admin' ? 'ADMINISTRATOR PORTAL' : 'STAFF & FACULTY PORTAL'}</div>
+          <h1>{portal === 'admin' ? <>Manage your<br />college workspace.</> : <>Every day,<br />accounted for.</>}</h1>
+          <p>{portal === 'admin' ? 'Approvals, reports, staff, and college setup in one place.' : 'Attendance, tasks, leave, and projects for your college team.'}</p>
         </div>
-        <div className="login-art-note"><ShieldCheck size={17} /> Join your college using its assigned College ID</div>
+        <div className="login-art-note"><ShieldCheck size={17} />{portal === 'admin' ? 'Authorized administrators only' : 'New staff can register with their College ID'}</div>
         <div className="art-shape art-shape-one" />
         <div className="art-shape art-shape-two" />
       </div>
       <section className="login-card">
         <div className="mobile-brand brand"><span className="brand-mark"><Activity size={20} /></span> AttendEase</div>
-        <div className="eyebrow">{mode === 'login' ? 'WELCOME BACK' : isVerifying ? (isVerifyingLogin ? 'EMAIL SIGN-IN' : 'EMAIL VERIFICATION') : 'GET STARTED'}</div>
-        <h2>{mode === 'login' ? 'Sign in to your account' : isVerifying ? (isVerifyingLogin ? 'Check your email' : 'Verify your email') : 'Create your account'}</h2>
-        <p className="muted">{mode === 'login' ? 'Enter your registered college email and we’ll send you a sign-in code.' : isVerifying ? `Enter the six-digit code sent to ${email}.` : 'Join your existing college with the College ID provided by your administrator.'}</p>
+        <div className="eyebrow">{mode === 'login' ? (portal === 'admin' ? 'ADMIN SIGN-IN' : 'USER SIGN-IN') : isVerifying ? (isVerifyingLogin ? 'EMAIL SIGN-IN' : 'EMAIL VERIFICATION') : 'GET STARTED'}</div>
+        <h2>{mode === 'login' ? (portal === 'admin' ? 'Admin portal sign in' : 'User portal sign in') : isVerifying ? (isVerifyingLogin ? 'Check your email' : 'Verify your email') : 'Create your account'}</h2>
+        <p className="muted">{mode === 'login' ? `Enter your registered college email to receive a secure ${portal === 'admin' ? 'admin' : 'user'} sign-in code.` : isVerifying ? `Enter the six-digit code sent to ${email}.` : 'Join your existing college with the College ID provided by your administrator.'}</p>
         {message && <div className="notice notice-success"><Check size={16} />{message}</div>}
         <form onSubmit={(event) => void (mode === 'login' ? requestSignInCode(event) : isVerifyingLogin ? verifySignInCode(event) : mode === 'register' ? register(event) : verifyEmail(event))} className="form-stack">
           {mode === 'register' && <>
@@ -371,9 +467,12 @@ function Login({ onLogin }: { onLogin: (user: User) => void }) {
         </button>}
         <div className="login-foot"><ShieldCheck size={15} /> {mode === 'login' ? 'Only active, verified email accounts can sign in.' : isVerifyingLogin ? 'Codes expire in 2–5 minutes based on your college’s settings and can only be used once.' : isVerifyingEmail ? 'Registration codes expire after five minutes and can only be used once.' : 'Only active colleges and matching College IDs are accepted.'}</div>
         {isVerifyingLogin && <button className="button button-link auth-switch" type="button" disabled={busy} onClick={() => changeMode('login')}>Use a different email</button>}
-        {mode === 'login' || mode === 'register' ? <button className="button button-link auth-switch" type="button" onClick={() => changeMode(mode === 'login' ? 'register' : 'login')}>
+        {portal === 'user' && (mode === 'login' || mode === 'register') ? <button className="button button-link auth-switch" type="button" onClick={() => changeMode(mode === 'login' ? 'register' : 'login')}>
           {mode === 'login' ? 'New here? Register' : 'Already registered? Sign in'}
         </button> : null}
+        <a className="button button-link auth-switch portal-switch" href={loginPath(portal === 'admin' ? 'user' : 'admin')}>
+          {portal === 'admin' ? 'Staff / faculty sign in' : 'Administrator sign in'}
+        </a>
       </section>
     </main>
   )
@@ -383,7 +482,7 @@ function MetricCard({ label, value, note, icon: Icon }: { label: string; value: 
   return <article className="metric-card"><div className="metric-icon"><Icon size={18} /></div><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-note">{note}</div></article>
 }
 
-function Overview({ user, navigate }: { user: User; navigate: (page: string) => void }) {
+function Dasboard ({ user, navigate }: { user: User; navigate: (page: string) => void }) {
   const manager = isManager(user.role)
   const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -440,6 +539,214 @@ function Overview({ user, navigate }: { user: User; navigate: (page: string) => 
           </div>
         </>
       )}
+    </div>
+  )
+}
+
+function UserDashboard({ user, navigate }: { user: User; navigate: (page: string) => void }) {
+  const { data, error, loading } = useReloadable(
+    () => fetchJson<DashboardData>('/dashboard/mine'),
+    `user-dashboard:${user.id}`,
+  )
+  const [selectedDay, setSelectedDay] = useState(() => (new Date().getDay() + 6) % 7)
+  const todayIndex = (new Date().getDay() + 6) % 7
+  const selectedDate = dateForCurrentWeekday(selectedDay)
+  const {
+    data: selectedScheduleData,
+    error: scheduleError,
+    reload: reloadSchedule,
+  } = useReloadable(
+    async () => ({
+      lectureDate: selectedDate,
+      items: await fetchJson<LectureScheduleItem[]>(`/lecture-attendance/mine?lecture_date=${selectedDate}`),
+    }),
+    `dashboard-lecture-attendance:${user.id}:${selectedDate}`,
+  )
+  const selectedLectures = selectedScheduleData?.lectureDate === selectedDate ? selectedScheduleData.items : null
+  const today = data?.today
+  const todayLectureCount = selectedDay === todayIndex && selectedLectures
+    ? selectedLectures.length
+    : data?.today_schedule.length || 0
+  const todayHours = ((today?.net_working_minutes || 0) / 60).toFixed(1)
+  const maxMonthlyHours = Math.max(1, ...(data?.monthly.hours_by_month.map((item) => item.hours) || []))
+  const todayLabel = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date())
+  const statusText = today ? statusLabel(today.status) : 'Not checked in'
+  const [lectureChallenge, setLectureChallenge] = useState<Challenge | null>(null)
+  const [activeLectureAction, setActiveLectureAction] = useState<{
+    schedule: LectureScheduleItem
+    action: 'punch_in' | 'punch_out'
+  } | null>(null)
+  const [lectureActionBusy, setLectureActionBusy] = useState(false)
+  const [lectureActionError, setLectureActionError] = useState('')
+  const [lectureActionMessage, setLectureActionMessage] = useState('')
+
+  async function beginLectureAction(schedule: LectureScheduleItem, action: 'punch_in' | 'punch_out') {
+    setLectureActionError('')
+    setLectureActionMessage('')
+    setActiveLectureAction({ schedule, action })
+    setLectureActionBusy(true)
+    try {
+      const { data: challenge } = await api.post<Challenge>('/biometrics/challenge', { action })
+      setLectureChallenge(challenge)
+    } catch (requestError) {
+      setLectureActionError(errorMessage(requestError))
+      setActiveLectureAction(null)
+    } finally {
+      setLectureActionBusy(false)
+    }
+  }
+
+  async function submitLectureAction(frames: string[]) {
+    if (!activeLectureAction || !lectureChallenge) return
+    setLectureActionBusy(true)
+    setLectureActionError('')
+    try {
+      await api.post(`/lecture-attendance/${activeLectureAction.action}`, {
+        source_type: activeLectureAction.schedule.source_type,
+        schedule_id: activeLectureAction.schedule.schedule_id,
+        lecture_date: activeLectureAction.schedule.lecture_date,
+        challenge_token: lectureChallenge.challenge_token,
+        frames,
+        face_image_base64: frames[frames.length - 1],
+        idempotency_key: crypto.randomUUID(),
+      })
+      setLectureActionMessage(
+        `${activeLectureAction.action === 'punch_in' ? 'Lecture punch in' : 'Lecture punch out'} recorded for ${activeLectureAction.schedule.subject}.`,
+      )
+      setActiveLectureAction(null)
+      setLectureChallenge(null)
+      reloadSchedule()
+    } catch (requestError) {
+      setLectureActionError(errorMessage(requestError))
+      setActiveLectureAction(null)
+      setLectureChallenge(null)
+    } finally {
+      setLectureActionBusy(false)
+    }
+  }
+
+  return (
+    <div className="page-content user-dashboard">
+      <div className="user-dashboard-welcome">
+        <div>
+          <div className="eyebrow">{todayLabel}</div>
+          <h1>Welcome back, {user.full_name.split(' ')[0]}! <span aria-hidden="true">👋</span></h1>
+          <p>Here’s your teaching Dasboard  for today.</p>
+        </div>
+        <div className="college-summary">
+          <span className="college-summary-icon"><GraduationCap size={24} /></span>
+          <span><strong>{data?.college.name || 'Your college'}</strong><small>{data?.college.code || user.employee_id}{data?.college.department ? ` · ${data.college.department}` : ''}</small></span>
+        </div>
+      </div>
+      {error && <ErrorBanner message={error} />}
+      {loading && !data ? <Loading /> : data ? (
+        <>
+          <div className="user-stat-grid">
+            <article className="user-stat-card stat-lectures">
+              <span className="user-stat-icon"><CalendarDays size={21} /></span>
+              <div><span className="user-stat-label">Today’s Lectures</span><strong>{todayLectureCount}</strong><small>{todayLectureCount === 1 ? 'scheduled lecture' : 'scheduled lectures'}</small></div>
+            </article>
+            <article className="user-stat-card stat-hours">
+              <span className="user-stat-icon"><Clock3 size={22} /></span>
+              <div><span className="user-stat-label">Today’s Hours</span><strong>{todayHours} hrs</strong><small>Net attendance hours</small></div>
+            </article>
+            <article className="user-stat-card stat-status">
+              <span className="user-stat-icon"><Check size={22} /></span>
+              <div className="user-stat-details"><span className="user-stat-label">Attendance Status</span><strong className="status-stat-value">{statusText}</strong><small>{today?.is_late ? `Late by ${today.late_by_minutes} minutes` : today?.punch_in_time ? `Punched in ${dateTime(today.punch_in_time)}` : 'No attendance recorded yet'}</small></div>
+              <button className="button button-primary user-punch-button" onClick={() => navigate('attendance')}><Clock3 size={15} />{today?.punch_in_time ? 'Workday Attendance' : 'Workday Punch In'}</button>
+            </article>
+          </div>
+
+          <div className="user-dashboard-grid user-dashboard-primary">
+            <section className="panel user-schedule-panel">
+              <div className="panel-heading">
+                <div><h3><CalendarDays size={18} /> Weekly Schedule</h3><p className="muted">{selectedDay === todayIndex ? `Today · ${todayLabel}` : formatDay(selectedDate)}</p></div>
+              </div>
+              {scheduleError && <ErrorBanner message={scheduleError} />}
+              {lectureActionError && <ErrorBanner message={lectureActionError} />}
+              {lectureActionMessage && <div className="notice notice-success"><Check size={17} />{lectureActionMessage}</div>}
+              <div className="dashboard-weekday-picker" aria-label="Choose schedule day">
+                {weekdayNames.map((day, index) => (
+                  <button
+                    className={`dashboard-weekday ${selectedDay === index ? 'dashboard-weekday-selected' : ''}`}
+                    key={day}
+                    type="button"
+                    aria-pressed={selectedDay === index}
+                    onClick={() => setSelectedDay(index)}
+                  >
+                    <span>{day.slice(0, 3)}</span>
+                    {index === todayIndex && <small>Today</small>}
+                  </button>
+                ))}
+              </div>
+              {!selectedLectures && !scheduleError ? <Loading /> : selectedLectures?.length ? <div className="dashboard-lecture-list">{selectedLectures.map((lecture) => {
+                const lectureStatus = lecture.status.replaceAll('_', ' ')
+                const statusClass = lecture.status === 'completed'
+                  ? 'lecture-status-completed'
+                  : lecture.status === 'in_progress'
+                    ? 'lecture-status-live'
+                    : lecture.status === 'missed'
+                      ? 'lecture-status-missed'
+                      : ''
+                return (
+                  <article className="dashboard-lecture" key={`${lecture.source_type}-${lecture.schedule_id}`}>
+                    <span className="lecture-timeline-dot" />
+                    <div className="dashboard-lecture-main">
+                      <div className="dashboard-lecture-time">{dateTime(`2000-01-01T${lecture.start_time}:00`)} – {dateTime(`2000-01-01T${lecture.end_time}:00`)}</div>
+                      <strong>{lecture.subject}</strong>
+                      <small>{[lecture.course_name, lecture.department, lecture.room ? `Room: ${lecture.room}` : null].filter(Boolean).join(' · ') || 'Scheduled lecture'}</small>
+                      {(lecture.punch_in_time || lecture.punch_out_time) && <small className="lecture-punch-times">In: {dateTime(lecture.punch_in_time)} · Out: {dateTime(lecture.punch_out_time)}</small>}
+                    </div>
+                    <span className={`lecture-status ${statusClass}`}>{statusLabel(lectureStatus)}</span>
+                    {lecture.can_punch_in && <button className="button button-primary lecture-action-button" disabled={lectureActionBusy} onClick={() => void beginLectureAction(lecture, 'punch_in')}>Punch In</button>}
+                    {lecture.can_punch_out && <button className="button button-secondary lecture-action-button" disabled={lectureActionBusy} onClick={() => void beginLectureAction(lecture, 'punch_out')}>Punch Out</button>}
+                    {lecture.punch_out_window_closed && <small className="lecture-window-closed">Punch-out window closed</small>}
+                  </article>
+                )
+              })}</div> : selectedLectures && <div className="dashboard-empty"><BookOpen size={22} /><strong>No lectures scheduled for {weekdayNames[selectedDay]}</strong><span>Your college timetable will appear here when it is set up.</span></div>}
+            </section>
+          </div>
+
+          <div className="user-dashboard-grid user-dashboard-secondary">
+            <section className="panel monthly-Dasboard -panel">
+              <div className="panel-heading"><div><h3><Activity size={18} /> Monthly Dasboard </h3><p className="muted">Your attendance this month</p></div></div>
+              <div className="monthly-summary">
+                <div className="monthly-hours-ring"><strong>{data.monthly.hours_worked}</strong><span>hours<br />worked</span></div>
+                <div className="monthly-summary-stats">
+                  <div><span>Completed workdays</span><strong>{data.monthly.completed_days}</strong></div>
+                  <div><span>Scheduled lectures this month</span><strong>{data.monthly.scheduled_lectures}</strong></div>
+                  <div><span>Average hours / workday</span><strong>{data.monthly.completed_days ? (data.monthly.hours_worked / data.monthly.completed_days).toFixed(1) : '0.0'}</strong></div>
+                </div>
+                <div className="monthly-bars" aria-label="Attendance hours over the past six months">
+                  {data.monthly.hours_by_month.map((item) => (
+                    <div className="monthly-bar-column" key={item.month} title={`${item.hours} hours`}>
+                      <span className="monthly-bar-value">{item.hours || ''}</span>
+                      <span className="monthly-bar-track"><span className="monthly-bar-fill" style={{ height: `${Math.max(item.hours ? 8 : 0, (item.hours / maxMonthlyHours) * 100)}%` }} /></span>
+                      <small>{new Date(`${item.month}T12:00:00`).toLocaleDateString(undefined, { month: 'short' })}</small>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="panel dashboard-notifications-panel">
+              <div className="panel-heading"><div><h3><Bell size={18} /> Recent Notifications</h3><p className="muted">{data.unread_notifications} unread</p></div></div>
+              {data.recent_notifications.length ? <div className="dashboard-notification-list">{data.recent_notifications.map((notification) => (
+                <article className={`dashboard-notification ${notification.is_read ? '' : 'dashboard-notification-unread'}`} key={notification.id}>
+                  <span className={`notification-type-dot notification-type-${notification.type}`} />
+                  <div><strong>{notification.title}</strong><p>{notification.message}</p><small>{new Date(notification.created_at).toLocaleString()}</small></div>
+                </article>
+              ))}</div> : <div className="dashboard-empty dashboard-empty-compact"><Bell size={20} /><strong>You’re all caught up</strong><span>New updates will appear here.</span></div>}
+            </section>
+          </div>
+          {lectureChallenge && activeLectureAction && <CaptureDialog
+            instruction={lectureChallenge.instruction}
+            busy={lectureActionBusy}
+            onCancel={() => { setActiveLectureAction(null); setLectureChallenge(null) }}
+            onCapture={(frames) => void submitLectureAction(frames)}
+          />}
+        </>
+      ) : null}
     </div>
   )
 }
@@ -835,6 +1142,103 @@ function LeavePage({ user }: { user: User }) {
   )
 }
 
+function AdditionalLecturesPage({ user }: { user: User }) {
+  const manager = isManager(user.role)
+  const [lectureDate, setLectureDate] = useState(localDate())
+  const [subject, setSubject] = useState('')
+  const [startTime, setStartTime] = useState('')
+  const [endTime, setEndTime] = useState('')
+  const [room, setRoom] = useState('')
+  const [reason, setReason] = useState('')
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const { data: requests, error: loadError, loading, reload } = useReloadable(
+    () => fetchJson<AdditionalLectureRequest[]>(manager ? '/admin/additional-lectures' : '/additional-lectures/mine'),
+    `additional-lectures:${user.id}:${manager}`,
+  )
+
+  async function submitRequest(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await api.post('/additional-lectures', {
+        lecture_date: lectureDate,
+        subject,
+        start_time: startTime,
+        end_time: endTime,
+        room: room || null,
+        reason,
+      })
+      setMessage('Your additional lecture request was sent for approval.')
+      setSubject('')
+      setStartTime('')
+      setEndTime('')
+      setRoom('')
+      setReason('')
+      await reload()
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function reviewRequest(item: AdditionalLectureRequest, approved: boolean) {
+    setBusy(true)
+    setError('')
+    try {
+      await api.post(`/admin/additional-lectures/${item.id}/review`, { approved })
+      await reload()
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="page-content">
+      <PageHeading eyebrow="ADDITIONAL CLASSES" title={manager ? 'Additional lecture requests' : 'Request an additional lecture'} description={manager ? 'Review extra teaching requests from your college or department.' : 'Request approval for a class outside your regular timetable.'} />
+      {(error || loadError) && <ErrorBanner message={error || loadError} />}
+      {message && <div className="notice notice-success"><Check size={17} />{message}</div>}
+      {!manager && <section className="panel">
+        <div className="panel-heading"><div><h3>New lecture request</h3><p className="muted">Your request is sent to your HOD and college administrator.</p></div><CalendarPlus size={19} className="panel-icon" /></div>
+        <form className="form-grid" onSubmit={(event) => void submitRequest(event)}>
+          <label>Lecture date<input type="date" value={lectureDate} min={localDate()} onChange={(event) => setLectureDate(event.target.value)} required /></label>
+          <label>Subject<input value={subject} onChange={(event) => setSubject(event.target.value)} required maxLength={200} /></label>
+          <label>Start time<input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} required /></label>
+          <label>End time<input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} required /></label>
+          <label>Room (optional)<input value={room} onChange={(event) => setRoom(event.target.value)} maxLength={100} /></label>
+          <label className="full-field">Reason<textarea value={reason} onChange={(event) => setReason(event.target.value)} rows={2} required maxLength={2000} /></label>
+          <div className="full-field"><button className="button button-primary" disabled={busy}>{busy ? 'Sending…' : 'Submit request'} <ChevronRight size={15} /></button></div>
+        </form>
+      </section>}
+      <section className="panel">
+        <div className="panel-heading"><div><h3>{manager ? 'Requests for review' : 'My requests'}</h3><p className="muted">{requests?.length || 0} request{requests?.length === 1 ? '' : 's'}</p></div></div>
+        {loading ? <Loading /> : requests?.length ? <div className="additional-lecture-list">{requests.map((item) => (
+          <article className="additional-lecture-card" key={item.id}>
+            <div className="additional-lecture-copy">
+              <div className="additional-lecture-title"><strong>{item.subject}</strong><StatusBadge status={item.status} /></div>
+              <span>{manager ? `${item.user_name} · ${item.employee_id}` : new Date(`${item.lecture_date}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' })}</span>
+              {manager && <span>{new Date(`${item.lecture_date}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}{item.department ? ` · ${item.department}` : ''}</span>}
+              <span>{item.start_time} – {item.end_time}{item.room ? ` · Room: ${item.room}` : ''}</span>
+              <p>{item.reason}</p>
+              {item.review_remarks && <small>Review note: {item.review_remarks}</small>}
+            </div>
+            {manager && item.status === 'pending' && <div className="additional-lecture-actions">
+              <button className="button button-primary" disabled={busy} onClick={() => void reviewRequest(item, true)}>Approve</button>
+              <button className="button button-secondary" disabled={busy} onClick={() => void reviewRequest(item, false)}>Reject</button>
+            </div>}
+          </article>
+        ))}</div> : <EmptyState icon={CalendarPlus} title={manager ? 'No lecture requests to review' : 'No additional lecture requests yet'} detail={manager ? 'New requests from faculty and staff will appear here.' : 'Requests you submit will appear here with their approval status.'} />}
+      </section>
+    </div>
+  )
+}
+
 function ApprovalsPage() {
   const [error, setError] = useState('')
   const [busyId, setBusyId] = useState<number | null>(null)
@@ -1096,6 +1500,171 @@ function DirectoryPage() {
   )
 }
 
+function ProfilePage({ user }: { user: User }) {
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [error, setError] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const { data: colleagues } = useReloadable(
+    () => fetchJson<DirectoryEntry[]>('/directory'),
+    `profile-directory:${user.id}`,
+  )
+  const department = colleagues?.find((person) => person.id === user.id)?.department
+
+  async function changePassword(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    setMessage('')
+    try {
+      await api.post('/auth/password/change', {
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+      setMessage('Password changed. You will be signed out shortly.')
+      window.setTimeout(() => {
+        clearTokens()
+        window.location.replace(loginPath(portalForRole(user.role)))
+      }, 1500)
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="page-content">
+      <PageHeading eyebrow="ACCOUNT" title="Profile & settings" description="Review your account details and secure your sign-in." />
+      {error && <ErrorBanner message={error} />}
+      {message && <div className="notice notice-success"><Check size={17} />{message}</div>}
+      <section className="panel profile-summary-panel">
+        <div className="profile-summary-avatar">{user.full_name.slice(0, 1)}</div>
+        <div className="profile-summary-info"><h2>{user.full_name}</h2><p>{user.designation || statusLabel(user.role)} · {user.employee_id}</p><StatusBadge status={user.face_enrollment_status} /></div>
+      </section>
+      <section className="panel">
+        <div className="panel-heading"><div><h3><UserRound size={17} /> Personal details</h3><p className="muted">Your registered college account</p></div></div>
+        <div className="profile-details-grid">
+          <div><span>Email address</span><strong>{user.email}</strong></div>
+          <div><span>Employee ID</span><strong>{user.employee_id}</strong></div>
+          <div><span>Department</span><strong>{department || 'Not assigned'}</strong></div>
+          <div><span>Role</span><strong>{statusLabel(user.role)}</strong></div>
+        </div>
+      </section>
+      <section className="panel">
+        <div className="panel-heading"><div><h3><KeyRound size={17} /> Change password</h3><p className="muted">You will need to sign in again after changing your password.</p></div></div>
+        <form className="form-grid" onSubmit={(event) => void changePassword(event)}>
+          <label>Current password<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label>
+          <label>New password<input type="password" autoComplete="new-password" minLength={12} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /><span className="table-subtext">Use at least 12 characters.</span></label>
+          <div className="full-field"><button className="button button-primary" disabled={busy}>{busy ? 'Updating…' : 'Update password'} <ChevronRight size={15} /></button></div>
+        </form>
+      </section>
+    </div>
+  )
+}
+
+const weekdayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+function TimetablePage({ user }: { user: User }) {
+  const manager = isManager(user.role)
+  const [teacherId, setTeacherId] = useState('')
+  const [subject, setSubject] = useState('')
+  const [courseName, setCourseName] = useState('')
+  const [dayOfWeek, setDayOfWeek] = useState('0')
+  const [startTime, setStartTime] = useState('')
+  const [endTime, setEndTime] = useState('')
+  const [room, setRoom] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const { data: lectures, error: loadError, loading, reload } = useReloadable(
+    () => fetchJson<WeeklyLecture[]>(manager ? '/admin/timetable' : '/timetable/mine'),
+    `timetable:${user.id}:${manager}`,
+  )
+  const { data: directory } = useReloadable(
+    () => manager ? fetchJson<DirectoryEntry[]>('/directory') : Promise.resolve([]),
+    `timetable-people:${manager}`,
+  )
+  const teachers = (directory || []).filter((person) => person.role === 'faculty' || person.role === 'staff')
+
+  async function addLecture(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      await api.post('/admin/timetable', {
+        user_id: Number(teacherId),
+        subject,
+        course_name: courseName || null,
+        day_of_week: Number(dayOfWeek),
+        start_time: startTime,
+        end_time: endTime,
+        room: room || null,
+      })
+      setSubject('')
+      setCourseName('')
+      setStartTime('')
+      setEndTime('')
+      setRoom('')
+      await reload()
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeLecture(id: number) {
+    setBusy(true)
+    setError('')
+    try {
+      await api.delete(`/admin/timetable/${id}`)
+      await reload()
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="page-content">
+      <PageHeading eyebrow={manager ? 'TIMETABLE SETUP' : 'YOUR WEEK'} title={manager ? 'Manage timetable' : 'My timetable'} description={manager ? 'Set recurring weekly lectures for faculty and staff.' : 'Your recurring weekly lecture schedule.'} />
+      {(error || loadError) && <ErrorBanner message={error || loadError} />}
+      {manager && <section className="panel">
+        <div className="panel-heading"><div><h3>Add a weekly lecture</h3><p className="muted">The selected teacher will see this entry on their dashboard.</p></div><CalendarPlus size={19} className="panel-icon" /></div>
+        <form className="form-grid" onSubmit={(event) => void addLecture(event)}>
+          <label>Faculty or staff<select value={teacherId} onChange={(event) => setTeacherId(event.target.value)} required><option value="" disabled>Select person</option>{teachers.map((teacher) => <option key={teacher.id} value={teacher.id}>{teacher.full_name} · {teacher.department || 'No department'}</option>)}</select></label>
+          <label>Subject<input value={subject} onChange={(event) => setSubject(event.target.value)} required maxLength={200} /></label>
+          <label>Course / class<input value={courseName} onChange={(event) => setCourseName(event.target.value)} maxLength={200} /></label>
+          <label>Day<select value={dayOfWeek} onChange={(event) => setDayOfWeek(event.target.value)}>{weekdayNames.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label>
+          <label>Start time<input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} required /></label>
+          <label>End time<input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} required /></label>
+          <label>Room<input value={room} onChange={(event) => setRoom(event.target.value)} maxLength={100} /></label>
+          <div className="full-field"><button className="button button-primary" disabled={busy || teachers.length === 0}>{busy ? 'Saving…' : 'Add to timetable'} <ChevronRight size={15} /></button></div>
+        </form>
+      </section>}
+      {loading ? <Loading /> : <div className="timetable-week">
+        {weekdayNames.map((day, dayIndex) => {
+          const dayLectures = (lectures || []).filter((lecture) => lecture.day_of_week === dayIndex)
+          return (
+            <section className={`panel timetable-day ${dayLectures.length ? '' : 'timetable-day-empty'}`} key={day}>
+              <div className="timetable-day-heading"><strong>{day}</strong><span>{dayLectures.length} lecture{dayLectures.length === 1 ? '' : 's'}</span></div>
+              {dayLectures.length ? <div className="timetable-day-list">{dayLectures.map((lecture) => (
+                <article className="timetable-entry" key={lecture.id}>
+                  <div className="timetable-entry-time">{lecture.start_time} – {lecture.end_time}</div>
+                  <div className="timetable-entry-copy"><strong>{lecture.subject}</strong><span>{[lecture.course_name, lecture.department, lecture.room ? `Room: ${lecture.room}` : null, manager ? lecture.user_name : null].filter(Boolean).join(' · ') || 'Lecture'}</span></div>
+                  {manager && <button className="button button-link button-compact" disabled={busy} onClick={() => void removeLecture(lecture.id)}>Remove</button>}
+                </article>
+              ))}</div> : <p className="muted">No lectures scheduled</p>}
+            </section>
+          )
+        })}
+      </div>}
+    </div>
+  )
+}
+
 type ProjectEntry = {
   id: number
   name: string
@@ -1302,8 +1871,9 @@ function EmptyState({ icon: Icon, title, detail }: { icon: typeof Bell; title: s
 }
 
 function App() {
+  const requestedPortal = portalFromPath(window.location.pathname)
   const [user, setUser] = useState<User | null>(null)
-  const [page, setPage] = useState('overview')
+  const [page, setPage] = useState('Dasboard ')
   const [pageMessage, setPageMessage] = useState('')
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null)
   const [checking, setChecking] = useState(Boolean(getAccessToken()))
@@ -1314,12 +1884,16 @@ function App() {
     if (!getAccessToken()) return
     api.get<User>('/auth/me')
       .then(({ data }) => {
+        if (portalForRole(data.role) !== requestedPortal) {
+          window.location.replace(loginPath(portalForRole(data.role)))
+          return
+        }
         setUser(data)
         if (data.face_enrollment_status === 'not_enrolled') setPage('enrollment')
       })
       .catch(() => clearTokens())
       .finally(() => setChecking(false))
-  }, [])
+  }, [requestedPortal])
 
   useEffect(() => {
     const logout = () => setUser(null)
@@ -1331,11 +1905,11 @@ function App() {
 
   function acceptUser(nextUser: User) {
     setUser(nextUser)
-    setPage(nextUser.face_enrollment_status === 'not_enrolled' ? 'enrollment' : 'overview')
+    setPage(nextUser.face_enrollment_status === 'not_enrolled' ? 'enrollment' : 'Dasboard ')
   }
 
   function completeEnrollment() {
-    setPage('overview')
+    setPage('Dasboard ')
     setPageMessage('Your face has been successfully registered! It is pending administrator approval for face-verified attendance.')
   }
 
@@ -1365,24 +1939,27 @@ function App() {
   }
 
   if (checking) return <div className="boot-screen"><span className="spinner" />Checking your secure session…</div>
-  if (!user) return <><Login onLogin={acceptUser} />{logoutError && <div className="toast-error">{logoutError}</div>}</>
+  if (!user) return <><Login portal={requestedPortal} onLogin={acceptUser} />{logoutError && <div className="toast-error">{logoutError}</div>}</>
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isManager(user.role) ? 'admin-portal-shell' : 'user-portal-shell'}`}>
       <aside className={`sidebar ${mobileMenu ? 'sidebar-open' : ''}`}>
         <div className="brand"><span className="brand-mark"><Activity size={20} /></span> AttendEase</div>
-        <div className="sidebar-label">WORKSPACE</div>
+        <div className="sidebar-label">{requestedPortal === 'admin' ? 'ADMIN PORTAL' : 'USER PORTAL'}</div>
         <nav>{navigation.map(({ key, label, icon: Icon }) => <button key={key} className={`nav-item ${page === key ? 'nav-active' : ''}`} onClick={() => selectPage(key)}><Icon size={18} /><span>{label}</span>{page === key && <span className="nav-indicator" />}</button>)}</nav>
         <div className="sidebar-spacer" />
         <div className="sidebar-footer"><div className="college-mark"><Building2 size={17} /></div><div><strong>College workspace</strong><span>{user.role.replaceAll('_', ' ')}</span></div></div>
+        <button className="sidebar-logout" onClick={() => void signOut()}><LogOut size={17} /><span>Log out</span></button>
       </aside>
       {mobileMenu && <button className="mobile-backdrop" aria-label="Close navigation" onClick={() => setMobileMenu(false)} />}
       <main className="main-area">
-        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumbs"><span>AttendEase</span><ChevronRight size={14} /><strong>{navigation.find((item) => item.key === page)?.label || 'Overview'}</strong></div><div className="topbar-user"><div className="topbar-avatar">{user.full_name.slice(0, 1)}</div><div className="topbar-user-copy"><strong>{user.full_name}</strong><span>{user.employee_id}</span></div><button className="icon-button" title="Sign out" onClick={() => void signOut()}><LogOut size={17} /></button></div></header>
+        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumbs"><span>AttendEase</span><ChevronRight size={14} /><strong>{navigation.find((item) => item.key === page)?.label || 'Dasboard '}</strong></div><div className="topbar-user"><div className="topbar-avatar">{user.full_name.slice(0, 1)}</div><div className="topbar-user-copy"><strong>{user.full_name}</strong><span>{user.employee_id}</span></div><button className="icon-button" title="Sign out" onClick={() => void signOut()}><LogOut size={17} /></button></div></header>
         {logoutError && <div className="logout-warning">{logoutError}</div>}
         {pageMessage && <div className="notice notice-success"><Check size={17} />{pageMessage}</div>}
-        {page === 'overview' && <Overview user={user} navigate={selectPage} />}
+        {page === 'Dasboard ' && (isManager(user.role) ? <Dasboard  user={user} navigate={selectPage} /> : <UserDashboard user={user} navigate={selectPage} />)}
+        {page === 'timetable' && <TimetablePage user={user} />}
         {page === 'attendance' && <AttendancePage />}
+        {page === 'additional_lectures' && <AdditionalLecturesPage user={user} />}
         {page === 'tasks' && <TasksPage user={user} selectedProjectId={selectedProjectId} />}
         {page === 'projects' && <ProjectsPage user={user} navigate={selectPage} />}
         {page === 'enrollment' && <EnrollmentPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
@@ -1392,7 +1969,8 @@ function App() {
         {page === 'people' && user.role === 'super_admin' && <PeoplePage />}
         {page === 'directory' && <DirectoryPage />}
         {page === 'notifications' && <NotificationsPage />}
-        {!navigation.some((item) => item.key === page) && <Overview user={user} navigate={selectPage} />}
+        {page === 'profile' && <ProfilePage user={user} />}
+        {!navigation.some((item) => item.key === page) && <Dasboard  user={user} navigate={selectPage} />}
         <footer className="app-footer"><span>AttendEase · College attendance</span><span><ShieldCheck size={14} /> Secure session</span></footer>
       </main>
     </div>

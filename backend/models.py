@@ -6,7 +6,7 @@ import enum
 from datetime import datetime, date, timezone
 from sqlalchemy import (
     Column, Integer, String, Text, Boolean, Float, DateTime, Date,
-    Time, Enum, ForeignKey, JSON, BigInteger, UniqueConstraint, Index, true
+    Time, Enum, ForeignKey, JSON, BigInteger, UniqueConstraint, Index, CheckConstraint, true
 )
 from sqlalchemy.orm import relationship
 from database import Base
@@ -576,6 +576,121 @@ class Notification(Base):
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="notifications")
+
+
+class WeeklyLecture(Base):
+    __tablename__ = "weekly_lectures"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subject = Column(String(200), nullable=False)
+    course_name = Column(String(200))
+    day_of_week = Column(Integer, nullable=False)
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+    room = Column(String(100))
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+    department = relationship("Department")
+
+    __table_args__ = (
+        Index("ix_weekly_lectures_college_day", "college_id", "day_of_week", "is_active"),
+        Index("ix_weekly_lectures_user_day", "user_id", "day_of_week", "is_active"),
+    )
+
+
+class AdditionalLectureRequest(Base):
+    __tablename__ = "additional_lecture_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    lecture_date = Column(Date, nullable=False)
+    subject = Column(String(200), nullable=False)
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+    room = Column(String(100))
+    reason = Column(Text, nullable=False)
+    status = Column(String(20), default="pending", nullable=False)
+    reviewed_by = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at = Column(DateTime)
+    review_remarks = Column(Text)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    user = relationship("User", foreign_keys=[user_id])
+
+    __table_args__ = (
+        Index("ix_additional_lecture_college_status", "college_id", "status"),
+        Index("ix_additional_lecture_user_created", "user_id", "created_at"),
+    )
+
+
+class LectureAttendanceRecord(Base):
+    __tablename__ = "lecture_attendance_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    weekly_lecture_id = Column(Integer, ForeignKey("weekly_lectures.id", ondelete="CASCADE"), nullable=True)
+    additional_lecture_request_id = Column(
+        Integer, ForeignKey("additional_lecture_requests.id", ondelete="CASCADE"), nullable=True
+    )
+    lecture_date = Column(Date, nullable=False)
+    punch_in_time = Column(DateTime)
+    punch_out_time = Column(DateTime)
+    punch_in_face_verified = Column(Boolean, default=False, nullable=False)
+    punch_out_face_verified = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+    weekly_lecture = relationship("WeeklyLecture")
+    additional_lecture_request = relationship("AdditionalLectureRequest")
+    events = relationship("LectureAttendanceEvent", back_populates="attendance", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(
+            "(weekly_lecture_id IS NOT NULL AND additional_lecture_request_id IS NULL) OR "
+            "(weekly_lecture_id IS NULL AND additional_lecture_request_id IS NOT NULL)",
+            name="ck_lecture_attendance_one_schedule",
+        ),
+        UniqueConstraint("weekly_lecture_id", "lecture_date", name="uq_weekly_lecture_attendance_date"),
+        UniqueConstraint(
+            "additional_lecture_request_id",
+            "lecture_date",
+            name="uq_additional_lecture_attendance_date",
+        ),
+        Index("ix_lecture_attendance_user_date", "user_id", "lecture_date"),
+    )
+
+
+class LectureAttendanceEvent(Base):
+    __tablename__ = "lecture_attendance_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    attendance_id = Column(
+        Integer, ForeignKey("lecture_attendance_records.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    event_type = Column(String(20), nullable=False)
+    event_time = Column(DateTime, nullable=False)
+    face_verified = Column(Boolean, default=False, nullable=False)
+    idempotency_key = Column(String(80), nullable=False)
+    ip_address = Column(String(45))
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    attendance = relationship("LectureAttendanceRecord", back_populates="events")
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name="uq_lecture_attendance_event_idempotency"),
+        Index("ix_lecture_attendance_events_record", "attendance_id"),
+    )
 
 
 # ===========================================================================
