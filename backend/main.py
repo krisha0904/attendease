@@ -1,709 +1,3051 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from sqlalchemy import or_
-from typing import Optional
-import datetime
+import hashlib
+import hmac
 import math
-import models, schemas, database, face_service
-import json
-import numpy as np
-import random
 import os
+import secrets
 import smtplib
+from datetime import date, datetime, time as time_type, timedelta, timezone
 from email.message import EmailMessage
-from database import engine, get_db, SessionLocal
-import uvicorn
+from typing import Callable, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+import models
+import face_service
+import liveness_service
+from password_service import hash_password, verify_password
+from database import get_db
 
 load_dotenv()
 
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-SMTP_FROM = os.getenv("SMTP_FROM") or SMTP_USERNAME
-DEBUG_OTP = os.getenv("DEBUG_OTP", "false").lower() == "true"
+JWT_ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+bearer_scheme = HTTPBearer(auto_error=False)
 
-models.Base.metadata.create_all(bind=engine)
-database.ensure_database_schema()
-
-# Seed initial data
-db_session = SessionLocal()
-if db_session.query(models.Department).count() == 0:
-    rollwala = models.Department(
-        name="Department of Computer Science - Rollwala Center",
-        lat=23.03594131796963,
-        lng=72.54588142528459,
-        radius=100.0
-    )
-    cs_block = models.Department(
-        name="Computer Science Academic Block & Labs",
-        lat=22.998200,
-        lng=72.498800,
-        radius=150.0
-    )
-    cs_library = models.Department(
-        name="CS Department Library & Seminar Hall",
-        lat=23.015000,
-        lng=72.532000,
-        radius=120.0
-    )
-    db_session.add_all([rollwala, cs_block, cs_library])
-    db_session.commit()
-
-if db_session.query(models.Event).count() == 0:
-    e1 = models.Event(
-        title="Computer Science Academic Council Meeting",
-        description="Quarterly review meeting for CS faculty members and lab heads in Seminar Hall A.\nPlease bring syllabus and lab curriculum updates.",
-        date="Tomorrow at 10:30 AM"
-    )
-    e2 = models.Event(
-        title="CS Department Biometric System Maintenance",
-        description="Scheduled maintenance for attendance servers on Saturday from 2 PM to 4 PM. Punch actions during this window will sync upon server restart.",
-        date="Saturday, 2:00 PM"
-    )
-    e3 = models.Event(
-        title="Annual CS Department Tech Fest Preparation",
-        description="Faculty coordinators and student volunteers needed for venue setup at the Department Complex.",
-        date="Next Monday"
-    )
-    db_session.add_all([e1, e2, e3])
-    db_session.commit()
-
-db_session.close()
-
-app = FastAPI(title="Smart Faculty Attendance API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-def haversine(lat1, lon1, lat2, lon2):
-    # Radius of the Earth in km
-    R = 6371.0
-
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-
-    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-    distance = R * c * 1000 # Convert to meters
-    return distance
+if JWT_ALGORITHM.upper() != "HS256":
+    raise RuntimeError("ALGORITHM must be HS256.")
 
 
-def normalize_identifier(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-
-    text = value.strip()
-    if not text:
-        return None
-
-    if "@" in text:
-        return text.lower()
-
-    digits = "".join(ch for ch in text if ch.isdigit())
-    if not digits:
-        return text.lower()
-
-    if len(digits) >= 10:
-        return digits[-10:]
-    return digits
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def send_email_otp(recipient: str, otp: str) -> bool:
-    if not SMTP_HOST or not SMTP_USERNAME or not SMTP_PASSWORD:
-        print(f"\nEMAIL OTP READY (SMTP not configured): {otp} for {recipient}\n")
-        return False
+class OTPRequest(BaseModel):
+    email: EmailStr
+
+
+class OTPVerification(BaseModel):
+    email: EmailStr
+    otp: str = Field(pattern=r"^\d{6}$")
+    device_info: str | None = Field(default=None, max_length=500)
+
+
+class PasswordLogin(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=1, max_length=128)
+    device_info: str | None = Field(default=None, max_length=500)
+
+
+class RegistrationRequest(BaseModel):
+    college_id: int = Field(gt=0)
+    college_code: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")
+    employee_id: str = Field(min_length=1, max_length=50)
+    full_name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
+    phone: str | None = Field(default=None, max_length=20)
+    password: str = Field(min_length=12, max_length=128)
+
+class RegistrationOtpRequest(BaseModel):
+    college_id: int = Field(gt=0)
+    email: EmailStr
+
+
+class RegistrationOtpVerification(RegistrationOtpRequest):
+    otp: str = Field(pattern=r"^\d{6}$")
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
+class PasswordSet(BaseModel):
+    password: str = Field(min_length=12, max_length=128)
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(min_length=32, max_length=200)
+
+
+class EmployeeCreate(BaseModel):
+    employee_id: str = Field(min_length=1, max_length=50)
+    full_name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
+    phone: str | None = Field(default=None, max_length=20)
+    password: str = Field(min_length=12, max_length=128)
+    department_id: int | None = None
+    shift_id: int | None = None
+    designation: str | None = Field(default=None, max_length=100)
+    role: models.UserRole = models.UserRole.FACULTY
+
+
+class ProjectCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    department_id: int | None = None
+
+
+class ProjectUpdate(BaseModel):
+    status: Literal["active", "on_hold", "completed"]
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    description: str | None = Field(default=None, max_length=4000)
+    project_id: int | None = None
+    assignee_id: int
+    due_date: date | None = None
+
+
+class TaskUpdate(BaseModel):
+    status: Literal["todo", "in_progress", "completed"] | None = None
+    progress: int | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def require_update(self):
+        if self.status is None and self.progress is None:
+            raise ValueError("Provide a task status or progress update.")
+        return self
+
+
+class DepartmentCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    code: str | None = Field(default=None, max_length=50)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+AttendanceAction = Literal["punch_in", "punch_out", "break_start", "break_end"]
+ChallengeAction = Literal["enrollment", "punch_in", "punch_out", "break_start", "break_end"]
+
+
+class ChallengeRequest(BaseModel):
+    action: ChallengeAction
+
+
+class BiometricEnrollmentRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=100)
+    frames: list[str] = Field(min_length=4, max_length=12)
+    face_image_base64: str = Field(min_length=100, max_length=7_000_000)
+    consent: bool
+
+    @model_validator(mode="after")
+    def face_image_in_liveness_sequence(self):
+        _validate_capture_frames(self.frames)
+        if self.face_image_base64 not in self.frames:
+            raise ValueError("The face image must be one of the liveness frames.")
+        return self
+
+
+class AttendanceActionRequest(BaseModel):
+    challenge_token: str | None = Field(default=None, min_length=32, max_length=100)
+    frames: list[str] | None = Field(default=None, min_length=4, max_length=12)
+    face_image_base64: str | None = Field(default=None, min_length=100, max_length=7_000_000)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    accuracy: float | None = Field(default=None, gt=0, le=5000)
+    idempotency_key: str = Field(min_length=16, max_length=80)
+
+    @model_validator(mode="after")
+    def require_face_image_in_liveness_sequence(self):
+        if self.frames is not None:
+            _validate_capture_frames(self.frames)
+        supplied = (self.challenge_token, self.frames, self.face_image_base64)
+        if any(value is not None for value in supplied):
+            if not all(value is not None for value in supplied):
+                raise ValueError("A challenge token, liveness frames, and face image are required together.")
+            if self.face_image_base64 not in self.frames:
+                raise ValueError("The face image must be one of the liveness frames.")
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("Latitude and longitude must be supplied together.")
+        return self
+
+
+class LocationUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    geofence_radius: float = Field(gt=0, le=5000)
+    min_gps_accuracy: float = Field(gt=0, le=1000)
+
+
+class ShiftCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    start_time: time_type
+    end_time: time_type
+    grace_period_minutes: int = Field(default=15, ge=0, le=240)
+    half_day_minutes: int = Field(default=240, ge=1, le=1440)
+    full_day_minutes: int = Field(default=360, ge=1, le=1440)
+    max_break_minutes: int = Field(default=60, ge=0, le=600)
+    is_overnight: bool = False
+
+
+class AssignShift(BaseModel):
+    shift_id: int | None
+
+
+class LeaveApplicationCreate(BaseModel):
+    leave_type_id: int
+    start_date: date
+    end_date: date
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def valid_range(self):
+        if self.end_date < self.start_date:
+            raise ValueError("Leave end date must be on or after the start date.")
+        if (self.end_date - self.start_date).days > 365:
+            raise ValueError("A leave request cannot exceed one year.")
+        return self
+
+
+class LeaveTypeCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    code: str = Field(min_length=1, max_length=20)
+    max_days_per_year: int = Field(ge=0, le=366)
+    is_paid: bool = True
+    requires_document: bool = False
+
+
+class LeaveReview(BaseModel):
+    approved: bool
+    remarks: str | None = Field(default=None, max_length=2000)
+
+
+class AttendancePolicyUpdate(BaseModel):
+    require_face_for_breaks: bool | None = None
+    require_gps_for_breaks: bool | None = None
+    max_otp_attempts: int | None = Field(default=None, ge=1, le=10)
+    otp_validity_minutes: int | None = Field(default=None, ge=2, le=5)
+    otp_resend_cooldown_seconds: int | None = Field(default=None, ge=60, le=60)
+
+
+class UserSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    employee_id: str
+    full_name: str
+    email: str
+    college_id: int
+    department_id: int | None
+    shift_id: int | None
+    designation: str | None
+    role: models.UserRole
+    is_active: bool
+    face_enrollment_status: models.BiometricStatus
+
+
+def _secret_key() -> str:
+    key = os.getenv("SECRET_KEY", "")
+    if len(key) < 32 or key.lower().startswith(("your-super-secret", "replace-with-")):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured. Set a random SECRET_KEY of at least 32 characters.",
+        )
+    return key
+
+
+def _hash_otp(email: str, otp: str) -> str:
+    message = f"{email}:{otp}".encode("utf-8")
+    return hmac.new(_secret_key().encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def _hash_refresh_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _send_otp_email(recipient: str, otp: str, validity_minutes: int = 5) -> None:
+    host = os.getenv("SMTP_HOST")
+    username = os.getenv("SMTP_USERNAME")
+    password = os.getenv("SMTP_PASSWORD")
+    sender = os.getenv("SMTP_FROM") or username
+    port = int(os.getenv("SMTP_PORT", "587"))
+    if not host or not username or not password or not sender:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Email delivery is not configured.",
+        )
+
+    message = EmailMessage()
+    message["Subject"] = "Your AttendEase verification code"
+    message["From"] = sender
+    message["To"] = recipient
+    message.set_content(f"Your verification code is {otp}. It expires in {validity_minutes} minutes.")
 
     try:
-        msg = EmailMessage()
-        msg["Subject"] = "Your AttendEase login OTP"
-        msg["From"] = SMTP_FROM or SMTP_USERNAME
-        msg["To"] = recipient
-        msg.set_content(
-            f"Your AttendEase login OTP is: {otp}\n\n"
-            "Use this code to verify your identity and continue login."
-        )
-
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(host, port, timeout=15) as server:
             server.starttls()
-            server.login(SMTP_USERNAME, SMTP_PASSWORD)
-            server.send_message(msg)
-        return True
-    except Exception as exc:
-        print(f"SMTP delivery failed for {recipient}: {exc}")
-        return False
+            server.login(username, password)
+            server.send_message(message)
+    except (OSError, smtplib.SMTPException) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not deliver the sign-in code. Please try again later.",
+        ) from exc
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to Faculty Attendance API"}
 
-# Auth & User Endpoints
-@app.get("/check-user/{identifier}")
-def check_user(identifier: str, db: Session = Depends(get_db)):
-    lookup = normalize_identifier(identifier)
-    if not lookup:
-        return {"exists": False}
-
-    lookup_email = lookup.lower() if "@" in lookup else None
-    phone_variants = {lookup}
-    if lookup.isdigit():
-        phone_variants.add(lookup)
-
-    filters = [models.User.phone.in_(list(phone_variants))]
-    if lookup_email:
-        filters.append(models.User.email == lookup_email)
-
-    db_user = db.query(models.User).filter(or_(*filters)).first()
-    if db_user:
-        return {"exists": True, "user_id": db_user.id}
-    return {"exists": False}
-
-# Simple in-memory OTP storage for demo
-otp_storage = {}
-admin_otp_storage = {}
-
-@app.get("/events")
-def get_events(db: Session = Depends(get_db)):
-    events = db.query(models.Event).all()
-    return events
-
-@app.post("/admin/send-otp")
-def send_admin_otp(req: schemas.AdminOTPSendRequest, db: Session = Depends(get_db)):
-    otp = str(random.randint(100000, 999999))
-    admin_otp_storage[req.user_id] = otp
-    print(f"\n====================\nADMIN DEBUG OTP: {otp} for User ID {req.user_id} via email\n====================\n")
-    return {
-        "status": "success",
-        "message": "OTP sent successfully to Department Admin via email",
-        "otp": otp
+def _make_access_token(user: models.User, session_id: int) -> str:
+    now = _utcnow()
+    claims = {
+        "sub": str(user.id),
+        "sid": session_id,
+        "college_id": user.college_id,
+        "iat": now,
+        "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        "type": "access",
     }
-
-@app.post("/admin/verify-otp")
-def verify_admin_otp(req: schemas.AdminOTPVerifyRequest, db: Session = Depends(get_db)):
-    stored_otp = admin_otp_storage.get(req.user_id)
-    if stored_otp and stored_otp == req.otp:
-        del admin_otp_storage[req.user_id]
-        return {"success": True, "message": "Admin OTP verified successfully"}
-    raise HTTPException(status_code=401, detail="Invalid or expired Admin OTP")
-
-# Route aliases for backwards compatibility
-@app.post("/hr/send-otp")
-def send_hr_otp(req: schemas.AdminOTPSendRequest, db: Session = Depends(get_db)):
-    return send_admin_otp(req, db)
-
-@app.post("/hr/verify-otp")
-def verify_hr_otp(req: schemas.AdminOTPVerifyRequest, db: Session = Depends(get_db)):
-    return verify_admin_otp(req, db)
-
-@app.post("/send-otp/{identifier}")
-def send_otp(identifier: str, method: str = "email", db: Session = Depends(get_db)):
-    lookup = normalize_identifier(identifier)
-    if not lookup:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    lookup_email = lookup.lower() if "@" in lookup else None
-    phone_variants = {lookup}
-    if lookup.isdigit():
-        phone_variants.add(lookup)
-
-    filters = [models.User.phone.in_(list(phone_variants))]
-    if lookup_email:
-        filters.append(models.User.email == lookup_email)
-
-    db_user = db.query(models.User).filter(or_(*filters)).first()
-    if not db_user:
-        raise HTTPException(status_code=404, detail="Account not found")
-
-    target_email = db_user.email.lower() if db_user.email else (lookup_email or lookup).lower()
-    if not target_email or "@" not in target_email:
-        raise HTTPException(status_code=400, detail="No email is registered for this account")
-
-    otp = str(random.randint(100000, 999999))
-    otp_storage[lookup] = otp
-    otp_storage[normalize_identifier(lookup)] = otp
-    otp_storage[target_email] = otp
-
-    email_success = send_email_otp(target_email, otp)
-
-    print(f"\n{'='*20}")
-    print(f"OTP READY: {otp} for {lookup} via email to {target_email}")
-    print(f"{'='*20}\n")
-
-    payload = {
-        "message": "OTP sent successfully via email",
-        "email_success": email_success,
-        "delivery_status": "email"
-    }
-    if DEBUG_OTP:
-        payload["otp"] = otp
-    return payload
-
-@app.post("/verify-otp")
-def verify_otp(request: schemas.OTPVerifyRequest, db: Session = Depends(get_db)):
-    identifier = request.phone or request.email
-    if not identifier:
-        raise HTTPException(status_code=400, detail="Phone or email is required")
-
-    lookup = normalize_identifier(identifier)
-    if not lookup:
-        raise HTTPException(status_code=400, detail="Phone or email is required")
-
-    stored_otp = otp_storage.get(lookup) or otp_storage.get((lookup or "").lower()) or otp_storage.get(normalize_identifier(lookup))
-    if stored_otp and stored_otp == request.otp:
-        otp_storage.pop(lookup, None)
-        otp_storage.pop((lookup or "").lower(), None)
-        otp_storage.pop(normalize_identifier(lookup), None)
-
-        lookup_email = lookup.lower() if "@" in lookup else None
-        phone_variants = {lookup}
-        if lookup.isdigit():
-            phone_variants.add(lookup)
-
-        filters = [models.User.phone.in_(list(phone_variants))]
-        if lookup_email:
-            filters.append(models.User.email == lookup_email)
-
-        db_user = db.query(models.User).filter(or_(*filters)).first()
-        if not db_user:
-            raise HTTPException(status_code=404, detail="Account not found")
-
-        needs_face_setup = db_user.face_embedding is None or db_user.face_embedding == ""
-        return {
-            "success": True,
-            "user_id": db_user.id,
-            "needs_face_setup": needs_face_setup,
-            "name": db_user.name
-        }
-
-    raise HTTPException(status_code=401, detail="Invalid OTP")
-
-@app.post("/register-face-only")
-def register_face_only(request: schemas.PunchInRequest, db: Session = Depends(get_db)):
-    db_user = db.query(models.User).filter(models.User.id == request.user_id).first()
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    embedding = face_service.get_face_embedding(request.face_image_base64)
-    if embedding is not None:
-        if isinstance(embedding, dict):
-            db_user.face_embedding = json.dumps(embedding)
-        else:
-            db_user.face_embedding = json.dumps(embedding.tolist())
-        db.commit()
-        return {"status": "success", "message": "Face profile registered successfully for existing faculty!"}
-
-    raise HTTPException(status_code=400, detail="Could not process face image embedding")
-
-@app.post("/register", response_model=schemas.UserResponse)
-def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    # Check if user exists
-    db_user = db.query(models.User).filter(models.User.faculty_id == user.faculty_id).first()
-    if db_user:
-        raise HTTPException(status_code=400, detail="Faculty ID already registered")
-
-    embedding_json = None
-    if user.face_image:
-        embedding = face_service.get_face_embedding(user.face_image)
-        if embedding is not None:
-            if isinstance(embedding, dict):
-                embedding_json = json.dumps(embedding)
-            else:
-                embedding_json = json.dumps(embedding.tolist())
-
-    # Create user data excluding face_image for the model
-    user_data = user.dict()
-    user_data.pop('face_image', None)
-
-    db_user = models.User(**user_data, face_embedding=embedding_json)
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-# Attendance Endpoints
-@app.post("/attendance/punch-in")
-def punch_in(punch: schemas.PunchInRequest, db: Session = Depends(get_db)):
-    # 1. Fetch User
-    db_user = db.query(models.User).filter(models.User.id == punch.user_id).first()
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # 2. Verify Face Embedding
-    if not db_user.face_embedding:
-         raise HTTPException(status_code=400, detail="Face not registered for this user")
-
-    stored_value = json.loads(db_user.face_embedding) if db_user.face_embedding else None
-    current_embedding = face_service.get_face_embedding(punch.face_image_base64)
-
-    if current_embedding is None:
-        raise HTTPException(status_code=400, detail="No face detected in photo")
-
-    is_verified = face_service.verify_faces(stored_value, current_embedding)
-
-    if not is_verified:
-        raise HTTPException(status_code=401, detail="Face verification failed")
-
-    # 3. Verify GPS Location (Geofencing)
-    dept = db.query(models.Department).filter(models.Department.id == db_user.department_id).first()
-    if dept:
-        dist_meters = haversine(dept.lat, dept.lng, punch.lat, punch.lng)
-        if dist_meters > dept.radius and not punch.out_of_range_reason:
-            raise HTTPException(
-                status_code=403,
-                detail=f"Out of range ({int(dist_meters)}m). Reason required (LJ, MoneyPlant, or Other)."
-            )
-
-    # 4. Save Attendance
-    new_attendance = models.Attendance(
-        user_id=punch.user_id,
-        punch_in=datetime.datetime.now(),
-        status="Present",
-        out_of_range_reason=punch.out_of_range_reason,
-        out_of_range_remarks=punch.out_of_range_remarks
-    )
-    db.add(new_attendance)
-    db.commit()
-
-    return {"status": "success", "message": f"Punched in at {datetime.datetime.now().strftime('%H:%M %p')}"}
-
-@app.post("/attendance/punch-out")
-def punch_out(punch: schemas.PunchOutRequest, db: Session = Depends(get_db)):
-    attendance = db.query(models.Attendance).filter(
-        models.Attendance.user_id == punch.user_id,
-        models.Attendance.punch_out.is_(None)
-    ).order_by(models.Attendance.id.desc()).first()
-
-    now = datetime.datetime.now()
-    if attendance:
-        attendance.punch_out = now
-        db.commit()
-        return {"status": "success", "message": f"Punched out at {now.strftime('%H:%M %p')}"}
-    else:
-        # Create completed record
-        new_attendance = models.Attendance(
-            user_id=punch.user_id,
-            punch_in=now,
-            punch_out=now,
-            status="Present"
-        )
-        db.add(new_attendance)
-        db.commit()
-        return {"status": "success", "message": f"Punched out at {now.strftime('%H:%M %p')}"}
-
-def build_attendance_report(db: Session, user_id: Optional[int] = None):
-    query = db.query(models.Attendance, models.User).join(models.User, models.Attendance.user_id == models.User.id)
-    if user_id:
-        query = query.filter(models.Attendance.user_id == user_id)
-
-    records = query.order_by(models.Attendance.punch_in.desc()).all()
-    results = []
-
-    for att, usr in records:
-        in_str = att.punch_in.strftime("%Y-%m-%d %H:%M:%S") if att.punch_in else "--"
-        out_str = att.punch_out.strftime("%Y-%m-%d %H:%M:%S") if att.punch_out else "Active"
-
-        duration_seconds = 0
-        if att.punch_in and att.punch_out:
-            duration_seconds = int((att.punch_out - att.punch_in).total_seconds())
-        elif att.punch_in:
-            duration_seconds = int((datetime.datetime.now() - att.punch_in).total_seconds())
-
-        hours, remainder = divmod(duration_seconds, 3600)
-        minutes, _ = divmod(remainder, 60)
-        duration_str = f"{hours}h {minutes}m" if duration_seconds else "--"
-        if att.punch_in and not att.punch_out:
-            duration_str = f"{hours}h {minutes}m (Active)"
-
-        results.append({
-            "id": att.id,
-            "user_id": usr.id,
-            "user_name": usr.name,
-            "faculty_id": usr.faculty_id,
-            "date": att.date.strftime("%Y-%m-%d") if att.date else "--",
-            "punch_in": in_str,
-            "punch_out": out_str,
-            "status": att.status or "Present",
-            "work_duration": duration_str,
-            "out_of_range_reason": att.out_of_range_reason or "In Range",
-            "total_minutes": int(duration_seconds / 60),
-        })
-
-    return results
+    return jwt.encode(claims, _secret_key(), algorithm=JWT_ALGORITHM)
 
 
-@app.get("/attendance/report")
-def get_attendance_report(
-    user_id: Optional[int] = None,
-    db: Session = Depends(get_db)
-):
-    return build_attendance_report(db, user_id=user_id)
-
-
-@app.get("/attendance/summary")
-def get_attendance_summary(db: Session = Depends(get_db)):
-    rows = build_attendance_report(db)
-    total_minutes = sum(item["total_minutes"] for item in rows)
-    present = sum(1 for item in rows if item["status"] == "Present")
-    return {
-        "total_records": len(rows),
-        "total_minutes": total_minutes,
-        "present_records": present,
-        "records": rows[:10],
-    }
-
-@app.get("/departments")
-def get_departments(db: Session = Depends(get_db)):
-    return db.query(models.Department).all()
-
-@app.get("/users/{user_id}")
-def get_user_profile(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
+def _user_payload(user: models.User) -> dict:
     return {
         "id": user.id,
-        "faculty_id": user.faculty_id,
-        "name": user.name,
+        "employee_id": user.employee_id,
+        "full_name": user.full_name,
         "email": user.email,
-        "phone": user.phone,
-        "role": user.role,
+        "college_id": user.college_id,
         "department_id": user.department_id,
+        "shift_id": user.shift_id,
+        "designation": user.designation,
+        "role": user.role.value,
+        "face_enrollment_status": user.face_enrollment_status.value,
     }
 
-@app.get("/attendance/summary/{user_id}")
-def get_user_attendance_summary(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
 
-    records = db.query(models.Attendance).filter(models.Attendance.user_id == user_id).order_by(models.Attendance.id.desc()).all()
-    total_seconds = 0
-    current_active = None
+def _validate_capture_frames(frames: list[str]) -> None:
+    if any(len(frame.encode("utf-8")) > 7_000_000 for frame in frames):
+        raise ValueError("An individual capture frame exceeds the 5 MB image limit.")
+    if sum(len(frame.encode("utf-8")) for frame in frames) > 12_000_000:
+        raise ValueError("The complete liveness capture exceeds the 12 MB request limit.")
 
-    for record in records:
-        if record.punch_in and record.punch_out:
-            total_seconds += int((record.punch_out - record.punch_in).total_seconds())
-        elif record.punch_in:
-            current_active = record
 
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, _ = divmod(remainder, 60)
-
-    latest = records[0] if records else None
-    punch_in = latest.punch_in.strftime("%I:%M %p") if latest and latest.punch_in else None
-    status = "Present" if current_active else ("Checked Out" if latest and latest.punch_out else "Not Started")
-
+def _issue_session(user: models.User, request: Request, db: Session, device_info: str | None) -> dict:
+    refresh_token = secrets.token_urlsafe(48)
+    now = _utcnow()
+    session = models.UserSession(
+        user_id=user.id,
+        refresh_token_hash=_hash_refresh_token(refresh_token),
+        device_info=device_info,
+        ip_address=request.client.host if request.client else None,
+        is_active=True,
+        expires_at=now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+        last_used=now,
+    )
+    db.add(session)
+    db.flush()
+    access_token = _make_access_token(user, session.id)
+    db.commit()
     return {
-        "user_id": user.id,
-        "name": user.name,
-        "faculty_id": user.faculty_id,
-        "total_work_hours": f"{hours}h {minutes}m",
-        "punch_in": punch_in,
-        "status": status,
-        "records_count": len(records),
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": _user_payload(user),
     }
 
-@app.post("/attendance/break")
-def toggle_break(user_id: int, db: Session = Depends(get_db)):
-    return {"status": "success", "message": "Break status updated"}
 
-# HOD / Admin Endpoints
-def get_user_status_for_today(db: Session, user_id: int):
-    today_start = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
-    today_end = today_start + datetime.timedelta(days=1)
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> models.User:
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication required.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if credentials is None:
+        raise unauthorized
 
-    attendance_records = db.query(models.Attendance).filter(
-        models.Attendance.user_id == user_id,
-        models.Attendance.punch_in >= today_start,
-        models.Attendance.punch_in < today_end,
-    ).order_by(models.Attendance.id.desc()).all()
+    try:
+        claims = jwt.decode(credentials.credentials, _secret_key(), algorithms=[JWT_ALGORITHM])
+        if claims.get("type") != "access":
+            raise unauthorized
+        user_id = int(claims["sub"])
+        session_id = int(claims["sid"])
+        college_id = int(claims["college_id"])
+    except (JWTError, KeyError, TypeError, ValueError):
+        raise unauthorized
 
-    if not attendance_records:
-        return {"status": "ABSENT", "time": "--"}
+    session = (
+        db.query(models.UserSession)
+        .filter(
+            models.UserSession.id == session_id,
+            models.UserSession.user_id == user_id,
+            models.UserSession.is_active.is_(True),
+            models.UserSession.expires_at > _utcnow(),
+        )
+        .first()
+    )
+    user = (
+        db.query(models.User)
+        .join(models.College, models.College.id == models.User.college_id)
+        .filter(
+            models.User.id == user_id,
+            models.User.college_id == college_id,
+            models.User.is_active.is_(True),
+            models.College.is_active.is_(True),
+        )
+        .first()
+    )
+    if session is None or user is None:
+        raise unauthorized
+    return user
 
-    latest = attendance_records[0]
-    active_break = db.query(models.Break).filter(
-        models.Break.attendance_id == latest.id,
-        models.Break.break_in.is_not(None),
-        models.Break.break_out.is_(None),
-    ).first()
 
-    if active_break:
-        return {"status": "ON BREAK", "time": active_break.break_in.strftime("%I:%M %p") if active_break.break_in else "--"}
+def require_roles(*roles: models.UserRole) -> Callable:
+    def role_dependency(user: models.User = Depends(get_current_user)) -> models.User:
+        if user.role not in roles:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Insufficient permissions.")
+        return user
 
-    if latest.punch_out is not None:
-        return {"status": "WORKING", "time": latest.punch_in.strftime("%I:%M %p") if latest.punch_in else "--"}
-
-    return {"status": "WORKING", "time": latest.punch_in.strftime("%I:%M %p") if latest.punch_in else "--"}
+    return role_dependency
 
 
-def build_hod_dashboard_summary(db: Session):
-    users = db.query(models.User).order_by(models.User.name.asc()).all()
-    staff_list = []
-    present = 0
-    on_break = 0
-    absent = 0
+def _attendance_now() -> datetime:
+    zone_name = os.getenv("ATTENDANCE_TIMEZONE", "UTC")
+    try:
+        return datetime.now(ZoneInfo(zone_name)).replace(tzinfo=None)
+    except ZoneInfoNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ATTENDANCE_TIMEZONE is not a valid IANA timezone.",
+        ) from exc
 
-    for user in users:
-        status_info = get_user_status_for_today(db, user.id)
-        status = status_info["status"]
-        if status == "WORKING":
-            present += 1
-        elif status == "ON BREAK":
-            on_break += 1
-        else:
-            absent += 1
 
-        staff_list.append({
-            "name": user.name,
-            "status": status,
-            "time": status_info["time"],
-        })
+def _active_policy(db: Session, college_id: int) -> models.AttendancePolicy | None:
+    return (
+        db.query(models.AttendancePolicy)
+        .filter(
+            models.AttendancePolicy.college_id == college_id,
+            models.AttendancePolicy.is_active.is_(True),
+        )
+        .first()
+    )
 
+
+def _otp_validity_minutes(policy: models.AttendancePolicy | None) -> int:
+    configured_minutes = policy.otp_validity_minutes if policy and policy.otp_validity_minutes is not None else 5
+    return min(5, max(2, configured_minutes))
+
+
+def _policy_requires(policy: models.AttendancePolicy | None, action: str, kind: str) -> bool:
+    if action in ("punch_in", "punch_out"):
+        return True
+    return bool(getattr(policy, f"require_{kind}_for_breaks", False)) if policy else False
+
+
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    earth_radius_m = 6_371_000
+    lat1_rad, lat2_rad = math.radians(lat1), math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+    haversine = (
+        math.sin(delta_lat / 2) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(delta_lon / 2) ** 2
+    )
+    return 2 * earth_radius_m * math.asin(min(1.0, math.sqrt(haversine)))
+
+
+def _log_biometric(
+    db: Session,
+    user: models.User,
+    action: str,
+    result: models.VerificationResult,
+    request: Request,
+    *,
+    similarity_score: float | None = None,
+    liveness_score: float | None = None,
+    liveness_passed: bool | None = None,
+    failure_reason: str | None = None,
+) -> None:
+    db.add(
+        models.BiometricVerificationLog(
+            user_id=user.id,
+            college_id=user.college_id,
+            action=action,
+            result=result,
+            similarity_score=similarity_score,
+            liveness_score=liveness_score,
+            liveness_passed=liveness_passed,
+            failure_reason=failure_reason,
+            ip_address=request.client.host if request.client else None,
+        )
+    )
+    db.commit()
+
+
+def _verify_liveness(
+    db: Session,
+    user: models.User,
+    action: str,
+    token: str,
+    frames: list[str],
+    request: Request,
+) -> float | None:
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    challenge = (
+        db.query(models.LivenessChallenge)
+        .filter(
+            models.LivenessChallenge.token_hash == token_hash,
+            models.LivenessChallenge.user_id == user.id,
+            models.LivenessChallenge.college_id == user.college_id,
+            models.LivenessChallenge.action == action,
+            models.LivenessChallenge.is_used.is_(False),
+            models.LivenessChallenge.expires_at > _utcnow(),
+        )
+        .with_for_update()
+        .first()
+    )
+    if challenge is None:
+        _log_biometric(
+            db, user, action, models.VerificationResult.FAIL, request,
+            liveness_passed=False, failure_reason="invalid_or_expired_challenge",
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired liveness challenge.")
+
+    challenge.is_used = True
+    instruction = challenge.instruction
+    db.commit()
+    try:
+        is_live, score = liveness_service.verify_sequence(instruction, frames)
+    except liveness_service.LivenessUnavailable as exc:
+        _log_biometric(
+            db, user, action, models.VerificationResult.ERROR, request,
+            liveness_passed=False, failure_reason="liveness_provider_unavailable",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Liveness verification is unavailable; face enrollment was not completed."
+                if action == "enrollment"
+                else "Liveness verification is unavailable; attendance was not recorded."
+            ),
+        ) from exc
+
+    if not is_live:
+        _log_biometric(
+            db, user, action, models.VerificationResult.FAIL, request,
+            liveness_score=score, liveness_passed=False, failure_reason="liveness_check_failed",
+        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Liveness verification failed.")
+    return score
+
+
+def _verify_face(
+    db: Session,
+    user: models.User,
+    action: str,
+    token: str,
+    frames: list[str],
+    face_image: str,
+    request: Request,
+    *,
+    enrollment: bool = False,
+) -> tuple[bool, float, float | None, object]:
+    liveness_score = _verify_liveness(db, user, action, token, frames, request)
+    template = None
+    if not enrollment:
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(
+                models.BiometricTemplate.user_id == user.id,
+                models.BiometricTemplate.college_id == user.college_id,
+                models.BiometricTemplate.enrollment_status == models.BiometricStatus.APPROVED,
+                models.BiometricTemplate.face_embedding.isnot(None),
+            )
+            .first()
+        )
+        if template is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Approved biometric enrollment is required before attendance.",
+            )
+
+    try:
+        current_embedding = face_service.embedding_from_base64(face_image)
+        if enrollment:
+            return True, 1.0, liveness_score, current_embedding
+        stored_embedding = face_service.decrypt_embedding(template.face_embedding)
+        matched, score = face_service.compare_embeddings(stored_embedding, current_embedding)
+    except face_service.FaceCaptureError as exc:
+        _log_biometric(
+            db, user, action, models.VerificationResult.FAIL, request,
+            liveness_score=liveness_score, liveness_passed=True,
+            failure_reason=str(exc)[:255],
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except face_service.FaceServiceUnavailable as exc:
+        _log_biometric(
+            db, user, action, models.VerificationResult.ERROR, request,
+            liveness_score=liveness_score, liveness_passed=True,
+            failure_reason="face_service_unavailable",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Face verification is unavailable; attendance was not recorded.",
+        ) from exc
+
+    _log_biometric(
+        db, user, action,
+        models.VerificationResult.PASS if matched else models.VerificationResult.FAIL,
+        request,
+        similarity_score=score,
+        liveness_score=liveness_score,
+        liveness_passed=True,
+        failure_reason=None if matched else "face_match_failed",
+    )
+    if not matched:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Face verification failed.")
+    return True, score, liveness_score, current_embedding
+
+
+def _verify_location(
+    db: Session,
+    user: models.User,
+    action: str,
+    payload: AttendanceActionRequest,
+) -> tuple[float, models.CollegeLocation]:
+    location = (
+        db.query(models.CollegeLocation)
+        .filter(
+            models.CollegeLocation.college_id == user.college_id,
+            models.CollegeLocation.is_active.is_(True),
+        )
+        .first()
+    )
+    if location is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The college attendance location has not been configured.",
+        )
+
+    failure = None
+    distance = None
+    if payload.latitude is None or payload.longitude is None or payload.accuracy is None:
+        failure = "location_required"
+    elif payload.accuracy > location.min_gps_accuracy:
+        failure = "gps_accuracy_too_low"
+    else:
+        distance = _haversine_m(
+            payload.latitude,
+            payload.longitude,
+            location.latitude,
+            location.longitude,
+        )
+        if distance + payload.accuracy > location.geofence_radius:
+            failure = "outside_geofence"
+    db.add(
+        models.LocationVerificationLog(
+            user_id=user.id,
+            college_id=user.college_id,
+            action=action,
+            latitude=payload.latitude,
+            longitude=payload.longitude,
+            accuracy=payload.accuracy,
+            distance_m=distance,
+            geofence_radius=location.geofence_radius,
+            result=models.VerificationResult.FAIL if failure else models.VerificationResult.PASS,
+            failure_reason=failure,
+        )
+    )
+    db.commit()
+    if failure:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Location verification failed.",
+        )
+    return distance, location
+
+
+def _working_minutes(started: datetime, ended: datetime) -> int:
+    return max(0, int((ended - started).total_seconds() // 60))
+
+
+def _attendance_payload(record: models.AttendanceRecord) -> dict:
+    active_break = next((item for item in record.breaks if item.break_end is None), None)
     return {
-        "present": present,
-        "on_break": on_break,
-        "absent": absent,
-        "staff_list": staff_list,
+        "id": record.id,
+        "date": record.date,
+        "status": record.status.value,
+        "punch_in_time": record.punch_in_time,
+        "punch_out_time": record.punch_out_time,
+        "total_working_minutes": record.total_working_minutes or 0,
+        "total_break_minutes": record.total_break_minutes or 0,
+        "net_working_minutes": record.net_working_minutes or 0,
+        "is_late": bool(record.is_late),
+        "late_by_minutes": record.late_by_minutes or 0,
+        "active_break_started_at": active_break.break_start if active_break else None,
     }
 
 
-@app.get("/hod/dashboard-summary")
-def get_hod_summary(db: Session = Depends(get_db)):
-    return build_hod_dashboard_summary(db)
+def _count_leave_days(
+    db: Session,
+    college_id: int,
+    start_date: date,
+    end_date: date,
+) -> int:
+    holiday_dates = {
+        row[0]
+        for row in db.query(models.Holiday.date)
+        .filter(
+            models.Holiday.college_id == college_id,
+            models.Holiday.date >= start_date,
+            models.Holiday.date <= end_date,
+        )
+        .all()
+    }
+    count = 0
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5 and current not in holiday_dates:
+            count += 1
+        current += timedelta(days=1)
+    return count
 
 
-def get_leave_status_for_user(db: Session, user_id: int):
-    leave_requests = db.query(models.LeaveRequest).filter(
-        models.LeaveRequest.user_id == user_id,
-    ).order_by(models.LeaveRequest.created_at.desc()).all()
+def _user_can_review(admin: models.User, employee: models.User) -> bool:
+    return admin.role == models.UserRole.SUPER_ADMIN or (
+        admin.role == models.UserRole.HOD
+        and employee.department_id is not None
+        and employee.department_id == admin.department_id
+    )
 
-    return [
-        {
-            "id": item.id,
-            "user_id": item.user_id,
-            "leave_type": item.leave_type,
-            "reason": item.reason,
-            "status": item.status,
-            "start_date": item.start_date.isoformat() if item.start_date else None,
-            "end_date": item.end_date.isoformat() if item.end_date else None,
-            "created_at": item.created_at.isoformat() if item.created_at else None,
-        }
-        for item in leave_requests
+
+def _pending_leave_count(db: Session, admin: models.User) -> int:
+    query = (
+        db.query(models.LeaveApplication.id)
+        .join(models.User, models.User.id == models.LeaveApplication.user_id)
+        .filter(
+            models.LeaveApplication.college_id == admin.college_id,
+            models.LeaveApplication.status == models.LeaveStatus.PENDING,
+        )
+    )
+    if admin.role == models.UserRole.HOD:
+        query = query.filter(models.User.department_id == admin.department_id)
+    return query.count()
+
+
+def _pending_biometric_count(db: Session, admin: models.User) -> int:
+    query = (
+        db.query(models.BiometricEnrollment.id)
+        .join(models.User, models.User.id == models.BiometricEnrollment.user_id)
+        .filter(
+            models.BiometricEnrollment.college_id == admin.college_id,
+            models.BiometricEnrollment.status == models.BiometricStatus.PENDING_APPROVAL,
+        )
+    )
+    if admin.role == models.UserRole.HOD:
+        query = query.filter(models.User.department_id == admin.department_id)
+    return query.count()
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="AttendEase API", version="1.0.0")
+    allowed_origins = [
+        origin.strip()
+        for origin in os.getenv(
+            "CORS_ORIGINS",
+            "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
     ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=allowed_origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/auth/colleges")
+    def list_registration_colleges(db: Session = Depends(get_db)):
+        colleges = (
+            db.query(models.College.id, models.College.name)
+            .filter(models.College.is_active.is_(True))
+            .order_by(func.lower(models.College.name), models.College.id)
+            .all()
+        )
+        return [{"id": college.id, "name": college.name} for college in colleges]
+
+    @app.post("/auth/register", status_code=status.HTTP_201_CREATED)
+    def register(payload: RegistrationRequest, request: Request, db: Session = Depends(get_db)):
+        now = _utcnow()
+        ip_address = request.client.host if request.client else None
+        if ip_address:
+            recent_registrations = (
+                db.query(models.SecurityEvent.id)
+                .filter(
+                    models.SecurityEvent.event_type == "auth.registration.created",
+                    models.SecurityEvent.ip_address == ip_address,
+                    models.SecurityEvent.created_at >= now - timedelta(hours=1),
+                )
+                .limit(10)
+                .count()
+            )
+            recent_pending_registrations = (
+                db.query(models.PendingRegistration.id)
+                .filter(
+                    models.PendingRegistration.ip_address == ip_address,
+                    models.PendingRegistration.created_at >= now - timedelta(hours=1),
+                )
+                .limit(10)
+                .count()
+            )
+            if recent_registrations + recent_pending_registrations >= 10:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many registrations from this connection. Try again later.",
+                )
+
+        college = (
+            db.query(models.College)
+            .filter(models.College.id == payload.college_id, models.College.is_active.is_(True))
+            .first()
+        )
+        if college is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selected college was not found or is inactive.")
+        if not hmac.compare_digest(college.code.upper(), payload.college_code.strip().upper()):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The College ID does not match the selected college.")
+
+        email = str(payload.email).strip().lower()
+        duplicate = (
+            db.query(models.User.id)
+            .filter(
+                models.User.college_id == college.id,
+                func.lower(models.User.email) == email,
+            )
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That email is already registered with this college.")
+        employee_id = payload.employee_id.strip()
+        duplicate_employee_id = db.query(models.User.id).filter(
+            models.User.college_id == college.id,
+            models.User.employee_id == employee_id,
+        ).first()
+        if duplicate_employee_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That employee ID is already registered with this college.")
+
+        duplicate_pending_email = db.query(models.PendingRegistration.id).filter(
+            models.PendingRegistration.college_id == college.id,
+            func.lower(models.PendingRegistration.email) == email,
+        ).first()
+        if duplicate_pending_email:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A registration is already pending for this email. Verify it or request a new code.")
+        duplicate_pending_employee = db.query(models.PendingRegistration.id).filter(
+            models.PendingRegistration.college_id == college.id,
+            models.PendingRegistration.employee_id == employee_id,
+        ).first()
+        if duplicate_pending_employee:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That employee ID is already used by a pending registration.")
+
+        otp = f"{secrets.randbelow(900000) + 100000:06d}"
+        pending = models.PendingRegistration(
+            college_id=college.id,
+            employee_id=employee_id,
+            full_name=payload.full_name.strip(),
+            email=email,
+            phone=payload.phone.strip() if payload.phone else None,
+            password_hash=hash_password(payload.password),
+            otp_hash=_hash_otp(email, otp),
+            attempts=0,
+            expires_at=now + timedelta(minutes=5),
+            otp_created_at=now,
+            ip_address=ip_address,
+        )
+        db.add(pending)
+        try:
+            _send_otp_email(email, otp)
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The college code, email, or employee ID is already registered.") from exc
+
+        return {
+            "message": "We sent a six-digit verification code to your email address.",
+            "email": email,
+            "role": models.UserRole.FACULTY.value,
+        }
+
+    @app.post("/auth/register/resend", status_code=status.HTTP_202_ACCEPTED)
+    def resend_registration_otp(
+        payload: RegistrationOtpRequest,
+        db: Session = Depends(get_db),
+    ):
+        email = str(payload.email).strip().lower()
+        college = db.query(models.College).filter(
+            models.College.id == payload.college_id,
+            models.College.is_active.is_(True),
+        ).first()
+        if college is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending registration was found for that college and email.")
+        pending = (
+            db.query(models.PendingRegistration)
+            .filter(
+                models.PendingRegistration.college_id == college.id,
+                func.lower(models.PendingRegistration.email) == email,
+            )
+            .first()
+        )
+        if pending is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No pending registration was found for that college and email.")
+        now = _utcnow()
+        if (now - pending.otp_created_at).total_seconds() < 60:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Wait one minute before requesting another verification code.")
+        otp = f"{secrets.randbelow(900000) + 100000:06d}"
+        pending.otp_hash = _hash_otp(email, otp)
+        pending.attempts = 0
+        pending.expires_at = now + timedelta(minutes=5)
+        pending.otp_created_at = now
+        try:
+            _send_otp_email(email, otp)
+            db.commit()
+        except HTTPException:
+            db.rollback()
+            raise
+        return {"message": "A new verification code was sent to your email address."}
+
+    @app.post("/auth/register/verify")
+    def verify_registration_otp(
+        payload: RegistrationOtpVerification,
+        db: Session = Depends(get_db),
+    ):
+        email = str(payload.email).strip().lower()
+        college = db.query(models.College).filter(
+            models.College.id == payload.college_id,
+            models.College.is_active.is_(True),
+        ).first()
+        if college is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification code.")
+        pending = (
+            db.query(models.PendingRegistration)
+            .filter(
+                models.PendingRegistration.college_id == college.id,
+                func.lower(models.PendingRegistration.email) == email,
+            )
+            .first()
+        )
+        if pending is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification code.")
+        now = _utcnow()
+        if pending.expires_at <= now:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification code.")
+        if not hmac.compare_digest(pending.otp_hash, _hash_otp(email, payload.otp)):
+            pending.attempts += 1
+            if pending.attempts >= 3:
+                pending.expires_at = now
+            db.commit()
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired verification code.")
+
+        existing_user = db.query(models.User.id).filter(
+            models.User.college_id == college.id,
+            func.lower(models.User.email) == email,
+        ).first()
+        if existing_user:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That email is already registered with this college.")
+        existing_employee = db.query(models.User.id).filter(
+            models.User.college_id == college.id,
+            models.User.employee_id == pending.employee_id,
+        ).first()
+        if existing_employee:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That employee ID is already registered with this college.")
+
+        try:
+            user = models.User(
+                college_id=college.id,
+                employee_id=pending.employee_id,
+                full_name=pending.full_name,
+                email=email,
+                phone=pending.phone,
+                password_hash=pending.password_hash,
+                role=models.UserRole.FACULTY,
+                email_verified=True,
+                is_active=True,
+            )
+            db.add(user)
+            db.flush()
+            db.add(
+                models.SecurityEvent(
+                    college_id=college.id,
+                    user_id=user.id,
+                    event_type="auth.registration.created",
+                    severity="low",
+                    description="User completed email-verified self-registration.",
+                    ip_address=pending.ip_address,
+                )
+            )
+            db.delete(pending)
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="That email or employee ID has already been registered with this college.",
+            ) from exc
+        return {"message": "Email verified. You can now sign in."}
+
+    @app.post("/auth/login")
+    def password_login(
+        payload: PasswordLogin,
+        request: Request,
+        db: Session = Depends(get_db),
+    ):
+        now = _utcnow()
+        ip_address = request.client.host if request.client else None
+        if ip_address:
+            recent_ip_failures = (
+                db.query(models.SecurityEvent.id)
+                .filter(
+                    models.SecurityEvent.event_type == "auth.password.failed",
+                    models.SecurityEvent.ip_address == ip_address,
+                    models.SecurityEvent.created_at >= now - timedelta(minutes=15),
+                )
+                .limit(20)
+                .count()
+            )
+            if recent_ip_failures >= 20:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many sign-in attempts. Wait 15 minutes before trying again.",
+                )
+
+        email = str(payload.email).strip().lower()
+        user = (
+            db.query(models.User)
+            .join(models.College, models.College.id == models.User.college_id)
+            .filter(
+                func.lower(models.User.email) == email,
+                models.User.is_active.is_(True),
+                models.College.is_active.is_(True),
+            )
+            .first()
+        )
+        recent_user_failures = 0
+        if user is not None:
+            recent_user_failures = (
+                db.query(models.SecurityEvent.id)
+                .filter(
+                    models.SecurityEvent.event_type == "auth.password.failed",
+                    models.SecurityEvent.user_id == user.id,
+                    models.SecurityEvent.created_at >= now - timedelta(minutes=15),
+                )
+                .limit(5)
+                .count()
+            )
+
+        password_matches = verify_password(
+            payload.password,
+            user.password_hash if user is not None and recent_user_failures < 5 else None,
+        )
+        if user is None or recent_user_failures >= 5 or not password_matches:
+            db.add(
+                models.SecurityEvent(
+                    college_id=user.college_id if user is not None else None,
+                    user_id=user.id if user is not None else None,
+                    event_type="auth.password.failed",
+                    severity="medium",
+                    description="Password sign-in failed.",
+                    ip_address=ip_address,
+                )
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Email or password is incorrect.",
+            )
+
+        return _issue_session(user, request, db, payload.device_info)
+
+    @app.post("/auth/password/change")
+    def change_password(
+        payload: PasswordChange,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if not verify_password(payload.current_password, user.password_hash):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect.")
+        if hmac.compare_digest(payload.current_password, payload.new_password):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a new password different from your current password.")
+        user.password_hash = hash_password(payload.new_password)
+        db.query(models.UserSession).filter(
+            models.UserSession.user_id == user.id,
+            models.UserSession.is_active.is_(True),
+        ).update({"is_active": False}, synchronize_session=False)
+        db.commit()
+        return {"message": "Password changed. Sign in again to continue."}
+
+    @app.post("/auth/otp/request", status_code=status.HTTP_202_ACCEPTED)
+    def request_otp(payload: OTPRequest, request: Request, db: Session = Depends(get_db)):
+        email = str(payload.email).strip().lower()
+        now = _utcnow()
+        ip_address = request.client.host if request.client else None
+        rate_limit = max(1, int(os.getenv("OTP_SENDS_PER_MINUTE", "5")))
+        if ip_address:
+            recent_requests = (
+                db.query(models.OTPVerification.id)
+                .filter(
+                    models.OTPVerification.ip_address == ip_address,
+                    models.OTPVerification.created_at >= now - timedelta(minutes=1),
+                )
+                .limit(rate_limit)
+                .count()
+            )
+            if recent_requests >= rate_limit:
+                return {"message": "If an active account exists, a sign-in code has been sent."}
+
+        user = (
+            db.query(models.User)
+            .filter(func.lower(models.User.email) == email, models.User.is_active.is_(True))
+            .first()
+        )
+        if user is None:
+            return {"message": "If an active account exists, a sign-in code has been sent."}
+
+        policy = (
+            db.query(models.AttendancePolicy)
+            .filter(
+                models.AttendancePolicy.college_id == user.college_id,
+                models.AttendancePolicy.is_active.is_(True),
+            )
+            .first()
+        )
+        cooldown = 60
+        validity_minutes = _otp_validity_minutes(policy)
+        latest = (
+            db.query(models.OTPVerification)
+            .filter(models.OTPVerification.user_id == user.id, models.OTPVerification.purpose == "login")
+            .order_by(models.OTPVerification.created_at.desc())
+            .first()
+        )
+        if latest and (now - latest.created_at).total_seconds() < cooldown:
+            return {"message": "If an active account exists, a sign-in code has been sent."}
+
+        otp = f"{secrets.randbelow(900000) + 100000:06d}"
+        db.query(models.OTPVerification).filter(
+            models.OTPVerification.user_id == user.id,
+            models.OTPVerification.purpose == "login",
+            models.OTPVerification.is_used.is_(False),
+        ).update({"is_used": True}, synchronize_session=False)
+        record = models.OTPVerification(
+            user_id=user.id,
+            otp_hash=_hash_otp(email, otp),
+            purpose="login",
+            attempts=0,
+            is_used=False,
+            expires_at=now + timedelta(minutes=validity_minutes),
+            ip_address=ip_address,
+        )
+        db.add(record)
+        db.commit()
+
+        try:
+            _send_otp_email(email, otp, validity_minutes)
+        except HTTPException:
+            record.is_used = True
+            db.commit()
+            raise
+        return {"message": "If an active account exists, a sign-in code has been sent."}
+
+    @app.post("/auth/otp/verify")
+    def verify_otp(payload: OTPVerification, request: Request, db: Session = Depends(get_db)):
+        email = str(payload.email).strip().lower()
+        user = (
+            db.query(models.User)
+            .filter(func.lower(models.User.email) == email, models.User.is_active.is_(True))
+            .first()
+        )
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
+
+        policy = (
+            db.query(models.AttendancePolicy)
+            .filter(
+                models.AttendancePolicy.college_id == user.college_id,
+                models.AttendancePolicy.is_active.is_(True),
+            )
+            .first()
+        )
+        max_attempts = max(1, policy.max_otp_attempts if policy else 3)
+        now = _utcnow()
+        record = (
+            db.query(models.OTPVerification)
+            .filter(
+                models.OTPVerification.user_id == user.id,
+                models.OTPVerification.purpose == "login",
+                models.OTPVerification.is_used.is_(False),
+                models.OTPVerification.expires_at > now,
+            )
+            .order_by(models.OTPVerification.created_at.desc())
+            .first()
+        )
+        if record is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
+
+        if not hmac.compare_digest(record.otp_hash, _hash_otp(email, payload.otp)):
+            record.attempts += 1
+            if record.attempts >= max_attempts:
+                record.is_used = True
+            db.commit()
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
+
+        record.is_used = True
+        tokens = _issue_session(user, request, db, payload.device_info)
+        return tokens
+
+    @app.post("/auth/refresh")
+    def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)):
+        old_hash = _hash_refresh_token(payload.refresh_token)
+        session = (
+            db.query(models.UserSession)
+            .filter(
+                models.UserSession.refresh_token_hash == old_hash,
+                models.UserSession.is_active.is_(True),
+                models.UserSession.expires_at > _utcnow(),
+            )
+            .with_for_update()
+            .first()
+        )
+        if session is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token.")
+        user = (
+            db.query(models.User)
+            .join(models.College, models.College.id == models.User.college_id)
+            .filter(
+                models.User.id == session.user_id,
+                models.User.is_active.is_(True),
+                models.College.is_active.is_(True),
+            )
+            .first()
+        )
+        if user is None:
+            session.is_active = False
+            db.commit()
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is inactive.")
+
+        now = _utcnow()
+        refresh_token = secrets.token_urlsafe(48)
+        updated = (
+            db.query(models.UserSession)
+            .filter(
+                models.UserSession.id == session.id,
+                models.UserSession.refresh_token_hash == old_hash,
+                models.UserSession.is_active.is_(True),
+                models.UserSession.expires_at > now,
+            )
+            .update(
+                {
+                    "refresh_token_hash": _hash_refresh_token(refresh_token),
+                    "expires_at": now + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+                    "last_used": now,
+                },
+                synchronize_session=False,
+            )
+        )
+        if updated != 1:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token.")
+        access_token = _make_access_token(user, session.id)
+        db.commit()
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+        }
+
+    @app.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+    def logout(user: models.User = Depends(get_current_user), credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), db: Session = Depends(get_db)):
+        try:
+            claims = jwt.decode(credentials.credentials, _secret_key(), algorithms=[JWT_ALGORITHM])
+            session_id = int(claims["sid"])
+        except (JWTError, KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid access token.")
+        session = (
+            db.query(models.UserSession)
+            .filter(models.UserSession.id == session_id, models.UserSession.user_id == user.id)
+            .first()
+        )
+        if session is not None:
+            session.is_active = False
+            db.commit()
+
+    @app.get("/auth/me", response_model=UserSummary)
+    def get_me(user: models.User = Depends(get_current_user)):
+        return user
+
+    @app.get("/admin/departments")
+    def list_departments(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        departments = (
+            db.query(models.Department)
+            .filter(
+                models.Department.college_id == admin.college_id,
+                models.Department.is_active.is_(True),
+            )
+            .order_by(models.Department.name)
+            .all()
+        )
+        return [
+            {"id": item.id, "name": item.name, "code": item.code}
+            for item in departments
+        ]
+
+    @app.post("/admin/departments", status_code=status.HTTP_201_CREATED)
+    def create_department(
+        payload: DepartmentCreate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        code = payload.code.strip().upper() if payload.code else None
+        department = models.Department(
+            college_id=admin.college_id,
+            name=payload.name.strip(),
+            code=code,
+            description=payload.description.strip() if payload.description else None,
+            is_active=True,
+        )
+        db.add(department)
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A department with this code already exists.") from exc
+        db.refresh(department)
+        return {"id": department.id, "name": department.name, "code": department.code}
+
+    @app.get("/admin/users", response_model=list[UserSummary])
+    def list_users(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        return (
+            db.query(models.User)
+            .filter(models.User.college_id == admin.college_id)
+            .order_by(models.User.full_name)
+            .all()
+        )
+
+    @app.get("/directory")
+    def faculty_directory(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        colleagues = (
+            db.query(models.User)
+            .filter(
+                models.User.college_id == user.college_id,
+                models.User.is_active.is_(True),
+            )
+            .order_by(models.User.full_name)
+            .all()
+        )
+        return [
+            {
+                "id": colleague.id,
+                "employee_id": colleague.employee_id,
+                "full_name": colleague.full_name,
+                "email": colleague.email,
+                "phone": colleague.phone,
+                "designation": colleague.designation,
+                "role": colleague.role.value,
+                "department_id": colleague.department_id,
+                "department": colleague.department.name if colleague.department else None,
+            }
+            for colleague in colleagues
+        ]
+
+    @app.get("/projects")
+    def list_projects(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.Project).filter(models.Project.college_id == user.college_id)
+        if user.role == models.UserRole.HOD:
+            query = query.filter(
+                (models.Project.department_id == user.department_id)
+                | (models.Project.department_id.is_(None))
+            )
+        projects = query.order_by(models.Project.updated_at.desc(), models.Project.name).all()
+        return [
+            {
+                "id": project.id,
+                "name": project.name,
+                "description": project.description,
+                "status": project.status,
+                "department": project.department.name if project.department else None,
+                "owner": project.owner.full_name if project.owner else None,
+                "can_manage": user.role == models.UserRole.SUPER_ADMIN or (
+                    user.role == models.UserRole.HOD
+                    and project.department_id == user.department_id
+                ),
+                "created_at": project.created_at,
+            }
+            for project in projects
+        ]
+
+    @app.post("/projects", status_code=status.HTTP_201_CREATED)
+    def create_project(
+        payload: ProjectCreate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators and HODs can create projects.")
+        department_id = payload.department_id
+        if user.role == models.UserRole.HOD:
+            if department_id not in (None, user.department_id):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only create projects for your department.")
+            department_id = user.department_id
+        if department_id is not None:
+            department = db.query(models.Department).filter(
+                models.Department.id == department_id,
+                models.Department.college_id == user.college_id,
+                models.Department.is_active.is_(True),
+            ).first()
+            if department is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found.")
+        project = models.Project(
+            college_id=user.college_id,
+            department_id=department_id,
+            owner_id=user.id,
+            name=payload.name.strip(),
+            description=payload.description.strip() if payload.description else None,
+            status="active",
+        )
+        db.add(project)
+        db.commit()
+        db.refresh(project)
+        return {
+            "id": project.id,
+            "name": project.name,
+            "description": project.description,
+            "status": project.status,
+            "department": project.department.name if project.department else None,
+            "owner": user.full_name,
+            "can_manage": True,
+            "created_at": project.created_at,
+        }
+
+    @app.patch("/projects/{project_id}")
+    def update_project(
+        project_id: int,
+        payload: ProjectUpdate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        project = db.query(models.Project).filter(
+            models.Project.id == project_id,
+            models.Project.college_id == user.college_id,
+        ).first()
+        if project is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+        can_manage = user.role == models.UserRole.SUPER_ADMIN or (
+            user.role == models.UserRole.HOD
+            and project.department_id == user.department_id
+        )
+        if not can_manage:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the project department manager can update its status.")
+        project.status = payload.status
+        db.commit()
+        return {"id": project.id, "status": project.status}
+
+    @app.get("/tasks")
+    def list_tasks(
+        scope: Literal["assigned_to_me", "assigned_by_me", "all"] = "assigned_to_me",
+        project_id: int | None = None,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.Task).filter(models.Task.college_id == user.college_id)
+        if project_id is not None:
+            query = query.filter(models.Task.project_id == project_id)
+        if scope == "assigned_to_me":
+            query = query.filter(models.Task.assignee_id == user.id)
+        elif scope == "assigned_by_me":
+            query = query.filter(models.Task.assigned_by_id == user.id)
+        elif user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to view all college tasks.")
+        if scope == "all" and user.role == models.UserRole.HOD:
+            query = query.join(models.User, models.User.id == models.Task.assignee_id).filter(
+                models.User.department_id == user.department_id
+            )
+        tasks = query.order_by(models.Task.due_date.is_(None), models.Task.due_date, models.Task.created_at.desc()).all()
+        return [
+            {
+                "id": task.id,
+                "title": task.title,
+                "description": task.description,
+                "project_id": task.project_id,
+                "project_name": task.project.name if task.project else None,
+                "assignee_id": task.assignee_id,
+                "assignee_name": task.assignee.full_name,
+                "assigned_by_name": task.assigned_by.full_name if task.assigned_by else None,
+                "due_date": task.due_date,
+                "status": task.status,
+                "progress": task.progress,
+                "created_at": task.created_at,
+            }
+            for task in tasks
+        ]
+
+    @app.post("/tasks", status_code=status.HTTP_201_CREATED)
+    def create_task(
+        payload: TaskCreate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators and HODs can assign tasks.")
+        assignee = db.query(models.User).filter(
+            models.User.id == payload.assignee_id,
+            models.User.college_id == user.college_id,
+            models.User.is_active.is_(True),
+        ).first()
+        if assignee is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active college employee not found.")
+        if user.role == models.UserRole.HOD and assignee.department_id != user.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only assign tasks within your department.")
+        project = None
+        if payload.project_id is not None:
+            project = db.query(models.Project).filter(
+                models.Project.id == payload.project_id,
+                models.Project.college_id == user.college_id,
+            ).first()
+            if project is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
+            if user.role == models.UserRole.HOD and project.department_id not in (None, user.department_id):
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only assign tasks to projects in your department.")
+        task = models.Task(
+            college_id=user.college_id,
+            project_id=project.id if project else None,
+            assignee_id=assignee.id,
+            assigned_by_id=user.id,
+            title=payload.title.strip(),
+            description=payload.description.strip() if payload.description else None,
+            due_date=payload.due_date,
+            status="todo",
+            progress=0,
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        return {
+            "id": task.id,
+            "title": task.title,
+            "description": task.description,
+            "project_id": task.project_id,
+            "project_name": project.name if project else None,
+            "assignee_id": assignee.id,
+            "assignee_name": assignee.full_name,
+            "assigned_by_name": user.full_name,
+            "due_date": task.due_date,
+            "status": task.status,
+            "progress": task.progress,
+            "created_at": task.created_at,
+        }
+
+    @app.patch("/tasks/{task_id}")
+    def update_task(
+        task_id: int,
+        payload: TaskUpdate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        task = db.query(models.Task).filter(
+            models.Task.id == task_id,
+            models.Task.college_id == user.college_id,
+        ).first()
+        if task is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
+        assignee = db.get(models.User, task.assignee_id)
+        can_manage = user.role == models.UserRole.SUPER_ADMIN or (
+            user.role == models.UserRole.HOD
+            and assignee is not None
+            and assignee.department_id == user.department_id
+        )
+        if user.id != task.assignee_id and not can_manage:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the assignee or their college manager can update this task.")
+        previous_status = task.status
+        if payload.status is not None:
+            task.status = payload.status
+            if payload.status == "completed":
+                task.progress = 100
+            elif previous_status == "completed" and payload.progress is None:
+                task.progress = 0
+        if payload.progress is not None:
+            task.progress = payload.progress
+            if payload.progress == 100:
+                task.status = "completed"
+            elif task.status == "completed":
+                task.status = "in_progress" if payload.progress else "todo"
+        db.commit()
+        db.refresh(task)
+        return {
+            "id": task.id,
+            "status": task.status,
+            "progress": task.progress,
+        }
+
+    @app.post("/admin/users", response_model=UserSummary, status_code=status.HTTP_201_CREATED)
+    def create_employee(
+        payload: EmployeeCreate,
+        request: Request,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        if payload.role == models.UserRole.SUPER_ADMIN:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Use the platform bootstrap process to add a super administrator.")
+        email = str(payload.email).strip().lower()
+        duplicate = (
+            db.query(models.User.id)
+            .filter(
+                models.User.college_id == admin.college_id,
+                func.lower(models.User.email) == email,
+            )
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered in this college.")
+        employee_id = payload.employee_id.strip()
+        duplicate_employee_id = (
+            db.query(models.User.id)
+            .filter(
+                models.User.college_id == admin.college_id,
+                models.User.employee_id == employee_id,
+            )
+            .first()
+        )
+        if duplicate_employee_id:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Employee ID is already registered in this college.")
+        if payload.department_id is not None:
+            department = (
+                db.query(models.Department.id)
+                .filter(
+                    models.Department.id == payload.department_id,
+                    models.Department.college_id == admin.college_id,
+                    models.Department.is_active.is_(True),
+                )
+                .first()
+            )
+            if department is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found in this college.")
+        if payload.shift_id is not None:
+            shift = (
+                db.query(models.WorkingShift.id)
+                .filter(
+                    models.WorkingShift.id == payload.shift_id,
+                    models.WorkingShift.college_id == admin.college_id,
+                    models.WorkingShift.is_active.is_(True),
+                )
+                .first()
+            )
+            if shift is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shift not found in this college.")
+
+        user = models.User(
+            college_id=admin.college_id,
+            department_id=payload.department_id,
+            shift_id=payload.shift_id,
+            employee_id=employee_id,
+            full_name=payload.full_name.strip(),
+            email=email,
+            phone=payload.phone.strip() if payload.phone else None,
+            password_hash=hash_password(payload.password),
+            designation=payload.designation,
+            role=payload.role,
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="employee.created",
+                resource_type="user",
+                resource_id=user.id,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        db.refresh(user)
+        return user
+
+    @app.put("/admin/users/{user_id}/password")
+    def reset_employee_password(
+        user_id: int,
+        payload: PasswordSet,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        employee = (
+            db.query(models.User)
+            .filter(
+                models.User.id == user_id,
+                models.User.college_id == admin.college_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if employee is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+        if employee.id == admin.id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Use the password-change endpoint to change your own password.",
+            )
+        employee.password_hash = hash_password(payload.password)
+        db.query(models.UserSession).filter(
+            models.UserSession.user_id == employee.id,
+            models.UserSession.is_active.is_(True),
+        ).update({"is_active": False}, synchronize_session=False)
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="employee.password_reset",
+                resource_type="user",
+                resource_id=employee.id,
+                ip_address=None,
+            )
+        )
+        db.commit()
+        return {"message": "Employee password reset. Share the temporary password securely."}
+
+    @app.get("/biometrics/status")
+    def biometric_status(user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(models.BiometricTemplate.user_id == user.id)
+            .first()
+        )
+        history = (
+            db.query(models.BiometricEnrollment)
+            .filter(models.BiometricEnrollment.user_id == user.id)
+            .order_by(models.BiometricEnrollment.created_at.desc())
+            .limit(20)
+            .all()
+        )
+        return {
+            "status": template.enrollment_status.value if template else models.BiometricStatus.NOT_ENROLLED.value,
+            "history": [
+                {
+                    "status": enrollment.status.value,
+                    "created_at": enrollment.created_at,
+                    "reviewed_at": enrollment.reviewed_at,
+                    "review_reason": enrollment.review_reason,
+                }
+                for enrollment in history
+            ],
+        }
+
+    @app.post("/biometrics/challenge")
+    def create_liveness_challenge(
+        payload: ChallengeRequest,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        instruction = "passive" if payload.action == "enrollment" else secrets.choice(("blink", "turn_left", "turn_right", "smile"))
+        raw_token = secrets.token_urlsafe(32)
+        now = _utcnow()
+        db.query(models.LivenessChallenge).filter(
+            models.LivenessChallenge.user_id == user.id,
+            models.LivenessChallenge.action == payload.action,
+            models.LivenessChallenge.is_used.is_(False),
+        ).update({"is_used": True}, synchronize_session=False)
+        db.add(
+            models.LivenessChallenge(
+                user_id=user.id,
+                college_id=user.college_id,
+                token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
+                action=payload.action,
+                instruction=instruction,
+                expires_at=now + timedelta(minutes=2),
+                is_used=False,
+            )
+        )
+        db.commit()
+        return {
+            "challenge_token": raw_token,
+            "instruction": instruction,
+            "expires_at": now + timedelta(minutes=2),
+            "frame_count": {"minimum": 4, "maximum": 12},
+        }
+
+    @app.post("/biometrics/enroll", status_code=status.HTTP_202_ACCEPTED)
+    def submit_biometric_enrollment(
+        payload: BiometricEnrollmentRequest,
+        request: Request,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if not payload.consent:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Explicit biometric consent is required.")
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(models.BiometricTemplate.user_id == user.id)
+            .with_for_update()
+            .first()
+        )
+        if template and template.enrollment_status in (
+            models.BiometricStatus.APPROVED,
+            models.BiometricStatus.PENDING_APPROVAL,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An approved or pending biometric enrollment already exists.",
+            )
+
+        _, _, liveness_score, embedding = _verify_face(
+            db,
+            user,
+            "enrollment",
+            payload.challenge_token,
+            payload.frames,
+            payload.face_image_base64,
+            request,
+            enrollment=True,
+        )
+        try:
+            existing_templates = (
+                db.query(models.BiometricTemplate)
+                .filter(
+                    models.BiometricTemplate.college_id == user.college_id,
+                    models.BiometricTemplate.user_id != user.id,
+                    models.BiometricTemplate.enrollment_status.in_(
+                        (models.BiometricStatus.APPROVED, models.BiometricStatus.PENDING_APPROVAL)
+                    ),
+                    models.BiometricTemplate.face_embedding.isnot(None),
+                )
+                .all()
+            )
+            for existing in existing_templates:
+                other_embedding = face_service.decrypt_embedding(existing.face_embedding)
+                duplicate, score = face_service.compare_embeddings(other_embedding, embedding)
+                if duplicate:
+                    _log_biometric(
+                        db, user, "enrollment", models.VerificationResult.FAIL, request,
+                        similarity_score=score, liveness_score=liveness_score,
+                        liveness_passed=True, failure_reason="duplicate_enrollment",
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="This face is already enrolled in this college.",
+                    )
+            encrypted_embedding = face_service.encrypt_embedding(embedding)
+        except face_service.FaceServiceUnavailable as exc:
+            _log_biometric(
+                db, user, "enrollment", models.VerificationResult.ERROR, request,
+                liveness_score=liveness_score, liveness_passed=True,
+                failure_reason="biometric_storage_or_matching_unavailable",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Biometric enrollment is temporarily unavailable.",
+            ) from exc
+
+        now = _utcnow()
+        if template is None:
+            template = models.BiometricTemplate(
+                user_id=user.id,
+                college_id=user.college_id,
+                face_embedding=encrypted_embedding,
+                enrollment_status=models.BiometricStatus.PENDING_APPROVAL,
+                enrolled_at=now,
+            )
+            db.add(template)
+        else:
+            template.face_embedding = encrypted_embedding
+            template.enrollment_status = models.BiometricStatus.PENDING_APPROVAL
+            template.enrolled_at = now
+            template.approved_at = None
+            template.approved_by = None
+            template.revoked_at = None
+            template.revoked_by = None
+            template.revoke_reason = None
+        user.face_enrolled = False
+        user.face_enrollment_status = models.BiometricStatus.PENDING_APPROVAL
+        db.add(
+            models.BiometricEnrollment(
+                user_id=user.id,
+                college_id=user.college_id,
+                status=models.BiometricStatus.PENDING_APPROVAL,
+                consented_at=now,
+            )
+        )
+        db.add(
+            models.AuditLog(
+                college_id=user.college_id,
+                user_id=user.id,
+                action="biometric.enrollment_submitted",
+                resource_type="biometric_template",
+                resource_id=template.id,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.add(
+            models.Notification(
+                user_id=user.id,
+                college_id=user.college_id,
+                title="Biometric enrollment submitted",
+                message="Your face enrollment is pending administrator approval.",
+                type="info",
+            )
+        )
+        db.add(
+            models.BiometricVerificationLog(
+                user_id=user.id,
+                college_id=user.college_id,
+                action="enrollment",
+                result=models.VerificationResult.PASS,
+                liveness_score=liveness_score,
+                liveness_passed=True,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        return {"status": models.BiometricStatus.PENDING_APPROVAL.value}
+
+    @app.delete("/biometrics/enrollment", status_code=status.HTTP_204_NO_CONTENT)
+    def withdraw_biometric_consent(
+        request: Request,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(models.BiometricTemplate.user_id == user.id)
+            .with_for_update()
+            .first()
+        )
+        if template:
+            template.face_embedding = None
+            template.enrollment_status = models.BiometricStatus.REVOKED
+            template.revoked_at = _utcnow()
+            template.revoked_by = user.id
+            template.revoke_reason = "User withdrew biometric consent."
+            db.add(
+                models.BiometricEnrollment(
+                    user_id=user.id,
+                    college_id=user.college_id,
+                    status=models.BiometricStatus.REVOKED,
+                    consented_at=template.enrolled_at or _utcnow(),
+                    reviewed_by=user.id,
+                    reviewed_at=_utcnow(),
+                    review_reason="User withdrew biometric consent.",
+                )
+            )
+        user.face_enrolled = False
+        user.face_enrollment_status = models.BiometricStatus.REVOKED
+        db.add(
+            models.AuditLog(
+                college_id=user.college_id,
+                user_id=user.id,
+                action="biometric.consent_withdrawn",
+                resource_type="biometric_template",
+                resource_id=template.id if template else None,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+
+    @app.get("/admin/biometrics/pending")
+    def pending_biometric_enrollments(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        query = (
+            db.query(models.BiometricEnrollment, models.User)
+            .join(models.User, models.User.id == models.BiometricEnrollment.user_id)
+            .filter(
+                models.BiometricEnrollment.college_id == admin.college_id,
+                models.BiometricEnrollment.status == models.BiometricStatus.PENDING_APPROVAL,
+            )
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == admin.department_id)
+        rows = query.order_by(models.BiometricEnrollment.created_at).all()
+        return [
+            {
+                "enrollment_id": enrollment.id,
+                "user": _user_payload(employee),
+                "created_at": enrollment.created_at,
+            }
+            for enrollment, employee in rows
+        ]
+
+    @app.post("/admin/biometrics/{enrollment_id}/review")
+    def review_biometric_enrollment(
+        enrollment_id: int,
+        payload: LeaveReview,
+        request: Request,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        enrollment = (
+            db.query(models.BiometricEnrollment)
+            .filter(
+                models.BiometricEnrollment.id == enrollment_id,
+                models.BiometricEnrollment.college_id == admin.college_id,
+                models.BiometricEnrollment.status == models.BiometricStatus.PENDING_APPROVAL,
+            )
+            .with_for_update()
+            .first()
+        )
+        if enrollment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending enrollment not found.")
+        employee = db.query(models.User).filter(models.User.id == enrollment.user_id).first()
+        if employee is None or (
+            admin.role == models.UserRole.HOD
+            and employee.department_id != admin.department_id
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending enrollment not found.")
+        if admin.id == employee.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot review your own enrollment.")
+
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(models.BiometricTemplate.user_id == employee.id)
+            .with_for_update()
+            .first()
+        )
+        if template is None or not template.face_embedding:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Biometric template is unavailable.")
+        now = _utcnow()
+        new_status = models.BiometricStatus.APPROVED if payload.approved else models.BiometricStatus.REJECTED
+        enrollment.status = new_status
+        enrollment.reviewed_by = admin.id
+        enrollment.reviewed_at = now
+        enrollment.review_reason = (payload.remarks or "").strip() or None
+        template.enrollment_status = new_status
+        template.approved_by = admin.id if payload.approved else None
+        template.approved_at = now if payload.approved else None
+        employee.face_enrolled = payload.approved
+        employee.face_enrollment_status = new_status
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="biometric.enrollment_reviewed",
+                resource_type="biometric_enrollment",
+                resource_id=enrollment.id,
+                new_value={"status": new_status.value, "remarks": enrollment.review_reason},
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.add(
+            models.Notification(
+                user_id=employee.id,
+                college_id=admin.college_id,
+                title="Biometric enrollment reviewed",
+                message=(
+                    "Your biometric enrollment was approved."
+                    if payload.approved
+                    else f"Your biometric enrollment was not approved. {enrollment.review_reason or ''}".strip()
+                ),
+                type="success" if payload.approved else "warning",
+            )
+        )
+        db.commit()
+        return {"status": new_status.value}
+
+    @app.get("/admin/location")
+    def get_college_location(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        location = (
+            db.query(models.CollegeLocation)
+            .filter(
+                models.CollegeLocation.college_id == admin.college_id,
+                models.CollegeLocation.is_active.is_(True),
+            )
+            .first()
+        )
+        if location is None:
+            return None
+        return {
+            "id": location.id,
+            "name": location.name,
+            "latitude": location.latitude,
+            "longitude": location.longitude,
+            "geofence_radius": location.geofence_radius,
+            "min_gps_accuracy": location.min_gps_accuracy,
+        }
+
+    @app.put("/admin/location")
+    def set_college_location(
+        payload: LocationUpdate,
+        request: Request,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        location = (
+            db.query(models.CollegeLocation)
+            .filter(models.CollegeLocation.college_id == admin.college_id)
+            .with_for_update()
+            .first()
+        )
+        if location is None:
+            location = models.CollegeLocation(college_id=admin.college_id)
+            db.add(location)
+        location.name = payload.name.strip()
+        location.latitude = payload.latitude
+        location.longitude = payload.longitude
+        location.geofence_radius = payload.geofence_radius
+        location.min_gps_accuracy = payload.min_gps_accuracy
+        location.is_active = True
+        db.flush()
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="college.location_updated",
+                resource_type="college_location",
+                resource_id=location.id,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        return {"message": "College attendance location saved."}
+
+    @app.get("/admin/shifts")
+    def list_shifts(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        shifts = (
+            db.query(models.WorkingShift)
+            .filter(models.WorkingShift.college_id == admin.college_id)
+            .order_by(models.WorkingShift.name)
+            .all()
+        )
+        return [
+            {
+                "id": shift.id,
+                "name": shift.name,
+                "start_time": shift.start_time.isoformat(),
+                "end_time": shift.end_time.isoformat(),
+                "grace_period_minutes": shift.grace_period_minutes,
+                "half_day_minutes": shift.half_day_minutes,
+                "full_day_minutes": shift.full_day_minutes,
+                "max_break_minutes": shift.max_break_minutes,
+                "is_overnight": shift.is_overnight,
+                "is_active": shift.is_active,
+            }
+            for shift in shifts
+        ]
+
+    @app.post("/admin/shifts", status_code=status.HTTP_201_CREATED)
+    def create_shift(
+        payload: ShiftCreate,
+        request: Request,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        if payload.full_day_minutes < payload.half_day_minutes:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Full-day minutes must be at least half-day minutes.")
+        shift = models.WorkingShift(
+            college_id=admin.college_id,
+            **payload.model_dump(),
+        )
+        db.add(shift)
+        db.flush()
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="working_shift.created",
+                resource_type="working_shift",
+                resource_id=shift.id,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        return {"id": shift.id, "name": shift.name}
+
+    @app.put("/admin/users/{employee_id}/shift")
+    def assign_employee_shift(
+        employee_id: int,
+        payload: AssignShift,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        employee = (
+            db.query(models.User)
+            .filter(
+                models.User.id == employee_id,
+                models.User.college_id == admin.college_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if employee is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Employee not found.")
+        if payload.shift_id is not None:
+            shift_exists = (
+                db.query(models.WorkingShift.id)
+                .filter(
+                    models.WorkingShift.id == payload.shift_id,
+                    models.WorkingShift.college_id == admin.college_id,
+                    models.WorkingShift.is_active.is_(True),
+                )
+                .first()
+            )
+            if shift_exists is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shift not found.")
+        employee.shift_id = payload.shift_id
+        db.commit()
+        return {"employee_id": employee.id, "shift_id": employee.shift_id}
+
+    @app.get("/admin/policy")
+    def get_attendance_policy(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        policy = _active_policy(db, admin.college_id)
+        return {
+            "require_face_for_punch_in": True,
+            "require_face_for_punch_out": True,
+            "require_face_for_breaks": policy.require_face_for_breaks if policy else False,
+            "require_gps_for_punch_in": True,
+            "require_gps_for_punch_out": True,
+            "require_gps_for_breaks": policy.require_gps_for_breaks if policy else False,
+            "max_otp_attempts": policy.max_otp_attempts if policy else 3,
+            "otp_validity_minutes": _otp_validity_minutes(policy),
+            "otp_resend_cooldown_seconds": 60,
+        }
+
+    @app.patch("/admin/policy")
+    def update_attendance_policy(
+        payload: AttendancePolicyUpdate,
+        request: Request,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        policy = _active_policy(db, admin.college_id)
+        if policy is None:
+            policy = models.AttendancePolicy(college_id=admin.college_id, is_active=True)
+            db.add(policy)
+        for key, value in payload.model_dump(exclude_unset=True).items():
+            setattr(policy, key, value)
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="attendance_policy.updated",
+                resource_type="attendance_policy",
+                resource_id=policy.id,
+                new_value=payload.model_dump(exclude_unset=True),
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        return {"message": "Attendance policy updated."}
+
+    @app.get("/attendance/policy")
+    def attendance_policy_for_user(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        policy = _active_policy(db, user.college_id)
+        return {
+            "require_face_for_punch_in": True,
+            "require_face_for_punch_out": True,
+            "require_face_for_breaks": policy.require_face_for_breaks if policy else False,
+            "require_gps_for_punch_in": False,
+            "require_gps_for_punch_out": False,
+            "require_gps_for_breaks": policy.require_gps_for_breaks if policy else False,
+        }
+
+    @app.post("/attendance/{action}")
+    def perform_attendance_action(
+        action: AttendanceAction,
+        payload: AttendanceActionRequest,
+        request: Request,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        existing_event = (
+            db.query(models.AttendanceEvent)
+            .filter(
+                models.AttendanceEvent.user_id == user.id,
+                models.AttendanceEvent.idempotency_key == payload.idempotency_key,
+            )
+            .first()
+        )
+        if existing_event is not None:
+            if existing_event.event_type != action:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Idempotency key was already used for another action.")
+            existing_record = (
+                db.query(models.AttendanceRecord)
+                .filter(models.AttendanceRecord.id == existing_event.attendance_id)
+                .first()
+            )
+            return _attendance_payload(existing_record)
+
+        face_verified = False
+        gps_verified = False
+        distance_m = None
+        policy = _active_policy(db, user.college_id)
+        face_required = action in ("punch_in", "punch_out") or (
+            action in ("break_start", "break_end") and policy is not None and policy.require_face_for_breaks
+        )
+        face_provided = payload.challenge_token is not None
+        if face_required and not face_provided:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A live face verification is required for this attendance action.",
+            )
+        if face_provided:
+            if payload.frames is None or payload.face_image_base64 is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="A complete live face verification is required for this attendance action.",
+                )
+            face_verified, _, _, _ = _verify_face(
+                db,
+                user,
+                action,
+                payload.challenge_token,
+                payload.frames,
+                payload.face_image_base64,
+                request,
+            )
+
+        now = _attendance_now()
+        today = now.date()
+        assigned_shift = (
+            db.query(models.WorkingShift)
+            .filter(
+                models.WorkingShift.id == user.shift_id,
+                models.WorkingShift.college_id == user.college_id,
+                models.WorkingShift.is_active.is_(True),
+            )
+            .first()
+        ) if user.shift_id else None
+        work_date = today
+        if assigned_shift and assigned_shift.is_overnight and now.time() < assigned_shift.end_time:
+            work_date -= timedelta(days=1)
+        record = (
+            db.query(models.AttendanceRecord)
+            .filter(
+                models.AttendanceRecord.user_id == user.id,
+                models.AttendanceRecord.college_id == user.college_id,
+                models.AttendanceRecord.date == work_date,
+            )
+            .with_for_update()
+            .first()
+        )
+        if action == "punch_in":
+            prior_open_record = (
+                db.query(models.AttendanceRecord.id)
+                .filter(
+                    models.AttendanceRecord.user_id == user.id,
+                    models.AttendanceRecord.college_id == user.college_id,
+                    models.AttendanceRecord.date < work_date,
+                    models.AttendanceRecord.date >= work_date - timedelta(days=1),
+                    models.AttendanceRecord.punch_in_time.isnot(None),
+                    models.AttendanceRecord.punch_out_time.is_(None),
+                )
+                .first()
+            )
+            if prior_open_record:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="A previous attendance record is still open; contact an administrator.",
+                )
+        elif record is None:
+            record = (
+                db.query(models.AttendanceRecord)
+                .filter(
+                    models.AttendanceRecord.user_id == user.id,
+                    models.AttendanceRecord.college_id == user.college_id,
+                    models.AttendanceRecord.date >= work_date - timedelta(days=1),
+                    models.AttendanceRecord.date < work_date,
+                    models.AttendanceRecord.punch_in_time.isnot(None),
+                    models.AttendanceRecord.punch_out_time.is_(None),
+                )
+                .order_by(models.AttendanceRecord.date.desc())
+                .with_for_update()
+                .first()
+            )
+        if action == "punch_in":
+            on_leave = (
+                db.query(models.LeaveApplication.id)
+                .filter(
+                    models.LeaveApplication.user_id == user.id,
+                    models.LeaveApplication.status == models.LeaveStatus.APPROVED,
+                    models.LeaveApplication.start_date <= work_date,
+                    models.LeaveApplication.end_date >= work_date,
+                )
+                .first()
+            )
+            if on_leave:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved leave prevents attendance punch-in.")
+            if record and record.punch_in_time is not None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You have already punched in today.")
+            if record is None:
+                record = models.AttendanceRecord(
+                    user_id=user.id,
+                    college_id=user.college_id,
+                    date=work_date,
+                    status=models.AttendanceStatus.ABSENT,
+                    shift_id=user.shift_id,
+                )
+                db.add(record)
+                db.flush()
+            record.punch_in_time = now
+            record.status = models.AttendanceStatus.PRESENT
+            record.punch_in_face_verified = face_verified
+            record.punch_in_latitude = payload.latitude
+            record.punch_in_longitude = payload.longitude
+            record.punch_in_distance_m = distance_m
+            record.punch_in_gps_verified = gps_verified
+            if assigned_shift:
+                shift_start = datetime.combine(work_date, assigned_shift.start_time)
+                late_by = _working_minutes(shift_start, now)
+                if now > shift_start + timedelta(minutes=assigned_shift.grace_period_minutes):
+                    record.is_late = True
+                    record.late_by_minutes = max(0, late_by - assigned_shift.grace_period_minutes)
+        elif action == "punch_out":
+            if record is None or record.punch_in_time is None or record.punch_out_time is not None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No open attendance record is available to punch out.")
+            active_break = next((item for item in record.breaks if item.break_end is None), None)
+            if active_break:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="End the active break before punching out.")
+            record.punch_out_time = now
+            record.status = models.AttendanceStatus.PUNCHED_OUT
+            record.punch_out_face_verified = face_verified
+            record.punch_out_latitude = payload.latitude
+            record.punch_out_longitude = payload.longitude
+            record.punch_out_distance_m = distance_m
+            record.punch_out_gps_verified = gps_verified
+            record.total_working_minutes = _working_minutes(record.punch_in_time, now)
+            record.total_break_minutes = sum(item.duration_minutes or 0 for item in record.breaks)
+            record.net_working_minutes = max(0, record.total_working_minutes - record.total_break_minutes)
+            shift = (
+                db.query(models.WorkingShift)
+                .filter(models.WorkingShift.id == record.shift_id, models.WorkingShift.college_id == user.college_id)
+                .first()
+            ) if record.shift_id else None
+            if shift:
+                expected_end = datetime.combine(record.date, shift.end_time)
+                if shift.is_overnight:
+                    expected_end += timedelta(days=1)
+                record.is_early_departure = now < expected_end
+                record.overtime_minutes = max(0, record.net_working_minutes - shift.full_day_minutes)
+                if record.net_working_minutes < shift.half_day_minutes:
+                    record.status = models.AttendanceStatus.HALF_DAY
+        elif action == "break_start":
+            if record is None or record.punch_in_time is None or record.punch_out_time is not None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Punch in before starting a break.")
+            if any(item.break_end is None for item in record.breaks):
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A break is already active.")
+            db.add(
+                models.BreakRecord(
+                    attendance_id=record.id,
+                    user_id=user.id,
+                    break_start=now,
+                )
+            )
+            record.status = models.AttendanceStatus.ON_BREAK
+        else:
+            if record is None or record.status != models.AttendanceStatus.ON_BREAK:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There is no active break to end.")
+            active_break = next((item for item in record.breaks if item.break_end is None), None)
+            if active_break is None:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="There is no active break to end.")
+            active_break.break_end = now
+            active_break.duration_minutes = _working_minutes(active_break.break_start, now)
+            record.total_break_minutes = sum(item.duration_minutes or 0 for item in record.breaks)
+            record.status = models.AttendanceStatus.PRESENT
+
+        db.add(
+            models.AttendanceEvent(
+                attendance_id=record.id,
+                user_id=user.id,
+                event_type=action,
+                event_time=now,
+                face_verified=face_verified,
+                gps_verified=gps_verified,
+                latitude=payload.latitude,
+                longitude=payload.longitude,
+                distance_m=distance_m,
+                idempotency_key=payload.idempotency_key,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Attendance action conflicts with a concurrent request; refresh and try again.",
+            ) from exc
+        db.refresh(record)
+        return _attendance_payload(record)
+
+    @app.get("/attendance/mine")
+    def my_attendance(
+        start_date: date | None = None,
+        end_date: date | None = None,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        today = _attendance_now().date()
+        start = start_date or (today - timedelta(days=30))
+        end = end_date or today
+        if end < start or (end - start).days > 366:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid attendance date range.")
+        records = (
+            db.query(models.AttendanceRecord)
+            .filter(
+                models.AttendanceRecord.user_id == user.id,
+                models.AttendanceRecord.college_id == user.college_id,
+                models.AttendanceRecord.date >= start,
+                models.AttendanceRecord.date <= end,
+            )
+            .order_by(models.AttendanceRecord.date.desc())
+            .all()
+        )
+        return [_attendance_payload(record) for record in records]
+
+    @app.get("/dashboard/mine")
+    def my_dashboard(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        today = _attendance_now().date()
+        record = (
+            db.query(models.AttendanceRecord)
+            .filter(
+                models.AttendanceRecord.user_id == user.id,
+                models.AttendanceRecord.date >= today - timedelta(days=1),
+                models.AttendanceRecord.date <= today,
+                models.AttendanceRecord.college_id == user.college_id,
+                models.AttendanceRecord.punch_out_time.is_(None),
+            )
+            .order_by(models.AttendanceRecord.date.desc())
+            .first()
+        )
+        if record is None:
+            record = (
+                db.query(models.AttendanceRecord)
+                .filter(
+                    models.AttendanceRecord.user_id == user.id,
+                    models.AttendanceRecord.date == today,
+                    models.AttendanceRecord.college_id == user.college_id,
+                )
+                .first()
+            )
+        recent = (
+            db.query(models.AttendanceRecord)
+            .filter(models.AttendanceRecord.user_id == user.id)
+            .order_by(models.AttendanceRecord.date.desc())
+            .limit(7)
+            .all()
+        )
+        return {
+            "user": _user_payload(user),
+            "today": _attendance_payload(record) if record else None,
+            "recent": [_attendance_payload(item) for item in recent],
+        }
+
+    @app.get("/admin/attendance")
+    def attendance_report(
+        report_date: date | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        department_id: int | None = None,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        today = _attendance_now().date()
+        start = report_date or start_date or today
+        end = report_date or end_date or today
+        if end < start or (end - start).days > 366:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid attendance report range.")
+        query = (
+            db.query(models.AttendanceRecord, models.User)
+            .join(models.User, models.User.id == models.AttendanceRecord.user_id)
+            .filter(
+                models.AttendanceRecord.college_id == admin.college_id,
+                models.AttendanceRecord.date >= start,
+                models.AttendanceRecord.date <= end,
+            )
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == admin.department_id)
+        elif department_id is not None:
+            query = query.filter(models.User.department_id == department_id)
+        rows = query.order_by(models.AttendanceRecord.date.desc(), models.User.full_name).limit(5000).all()
+        return [
+            {
+                **_attendance_payload(record),
+                "employee": {
+                    "id": employee.id,
+                    "employee_id": employee.employee_id,
+                    "full_name": employee.full_name,
+                    "department_id": employee.department_id,
+                },
+            }
+            for record, employee in rows
+        ]
+
+    @app.get("/admin/dashboard")
+    def admin_dashboard(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        today = _attendance_now().date()
+        users = db.query(models.User).filter(
+            models.User.college_id == admin.college_id,
+            models.User.is_active.is_(True),
+        )
+        records = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.college_id == admin.college_id,
+            models.AttendanceRecord.date == today,
+        )
+        if admin.role == models.UserRole.HOD:
+            users = users.filter(models.User.department_id == admin.department_id)
+            records = records.join(models.User).filter(models.User.department_id == admin.department_id)
+        record_rows = records.all()
+        status_counts: dict[str, int] = {}
+        for record in record_rows:
+            key = record.status.value
+            status_counts[key] = status_counts.get(key, 0) + 1
+        return {
+            "date": today,
+            "active_employees": users.count(),
+            "attendance_record_count": len(record_rows),
+            "status_counts": status_counts,
+            "pending_leave_applications": _pending_leave_count(db, admin),
+            "pending_biometric_enrollments": _pending_biometric_count(db, admin),
+        }
+
+    @app.get("/admin/reports/attendance.csv")
+    def export_attendance_csv(
+        report_date: date,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        import csv
+        import io
+        from fastapi.responses import StreamingResponse
+
+        query = (
+            db.query(models.AttendanceRecord, models.User)
+            .join(models.User, models.User.id == models.AttendanceRecord.user_id)
+            .filter(
+                models.AttendanceRecord.college_id == admin.college_id,
+                models.AttendanceRecord.date == report_date,
+            )
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == admin.department_id)
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(("Employee ID", "Name", "Date", "Status", "Punch in", "Punch out", "Net working minutes"))
+        for record, employee in query.order_by(models.User.full_name).all():
+            safe_name = "'" + employee.full_name if employee.full_name.startswith(("=", "+", "-", "@")) else employee.full_name
+            writer.writerow(
+                (
+                    employee.employee_id,
+                    safe_name,
+                    record.date.isoformat(),
+                    record.status.value,
+                    record.punch_in_time.isoformat() if record.punch_in_time else "",
+                    record.punch_out_time.isoformat() if record.punch_out_time else "",
+                    record.net_working_minutes or 0,
+                )
+            )
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="attendance-{report_date.isoformat()}.csv"'},
+        )
+
+    @app.get("/leave/types")
+    def list_leave_types(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        leave_types = (
+            db.query(models.LeaveType)
+            .filter(
+                models.LeaveType.college_id == user.college_id,
+                models.LeaveType.is_active.is_(True),
+            )
+            .order_by(models.LeaveType.name)
+            .all()
+        )
+        return [
+            {
+                "id": item.id,
+                "name": item.name,
+                "code": item.code,
+                "max_days_per_year": item.max_days_per_year,
+                "is_paid": item.is_paid,
+                "requires_document": item.requires_document,
+            }
+            for item in leave_types
+        ]
+
+    @app.post("/admin/leave-types", status_code=status.HTTP_201_CREATED)
+    def create_leave_type(
+        payload: LeaveTypeCreate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        code = payload.code.strip().upper()
+        duplicate = (
+            db.query(models.LeaveType.id)
+            .filter(
+                models.LeaveType.college_id == admin.college_id,
+                func.upper(models.LeaveType.code) == code,
+            )
+            .first()
+        )
+        if duplicate:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A leave type with this code already exists.")
+        leave_type = models.LeaveType(
+            college_id=admin.college_id,
+            name=payload.name.strip(),
+            code=code,
+            max_days_per_year=payload.max_days_per_year,
+            is_paid=payload.is_paid,
+            requires_document=payload.requires_document,
+            is_active=True,
+        )
+        db.add(leave_type)
+        db.commit()
+        db.refresh(leave_type)
+        return {"id": leave_type.id, "name": leave_type.name, "code": leave_type.code}
+
+    @app.post("/leave/applications", status_code=status.HTTP_201_CREATED)
+    def apply_for_leave(
+        payload: LeaveApplicationCreate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        leave_type = (
+            db.query(models.LeaveType)
+            .filter(
+                models.LeaveType.id == payload.leave_type_id,
+                models.LeaveType.college_id == user.college_id,
+                models.LeaveType.is_active.is_(True),
+            )
+            .first()
+        )
+        if leave_type is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave type not found.")
+        if leave_type.requires_document:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="This leave type requires supporting documents, but secure document upload is not configured.",
+            )
+        overlapping = (
+            db.query(models.LeaveApplication.id)
+            .filter(
+                models.LeaveApplication.user_id == user.id,
+                models.LeaveApplication.status.in_((models.LeaveStatus.PENDING, models.LeaveStatus.APPROVED)),
+                models.LeaveApplication.start_date <= payload.end_date,
+                models.LeaveApplication.end_date >= payload.start_date,
+            )
+            .first()
+        )
+        if overlapping:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This leave period overlaps another pending or approved request.")
+
+        total_days = _count_leave_days(db, user.college_id, payload.start_date, payload.end_date)
+        if total_days == 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The selected leave period contains no working days.")
+        current_year = payload.start_date.year
+        last_year = payload.end_date.year
+        while current_year <= last_year:
+            year_start = date(current_year, 1, 1)
+            year_end = date(current_year, 12, 31)
+            requested_start = max(payload.start_date, year_start)
+            requested_end = min(payload.end_date, year_end)
+            requested_days = _count_leave_days(db, user.college_id, requested_start, requested_end)
+            used_days = 0
+            existing_applications = (
+                db.query(models.LeaveApplication)
+                .filter(
+                    models.LeaveApplication.user_id == user.id,
+                    models.LeaveApplication.leave_type_id == leave_type.id,
+                    models.LeaveApplication.status.in_((models.LeaveStatus.PENDING, models.LeaveStatus.APPROVED)),
+                    models.LeaveApplication.start_date <= year_end,
+                    models.LeaveApplication.end_date >= year_start,
+                )
+                .all()
+            )
+            for existing in existing_applications:
+                used_days += _count_leave_days(
+                    db,
+                    user.college_id,
+                    max(existing.start_date, year_start),
+                    min(existing.end_date, year_end),
+                )
+            if used_days + requested_days > leave_type.max_days_per_year:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Requested leave exceeds the {leave_type.name} balance for {current_year}.",
+                )
+            current_year += 1
+
+        application = models.LeaveApplication(
+            user_id=user.id,
+            college_id=user.college_id,
+            leave_type_id=leave_type.id,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            total_days=total_days,
+            reason=payload.reason.strip(),
+            status=models.LeaveStatus.PENDING,
+        )
+        db.add(application)
+        db.flush()
+        reviewers = db.query(models.User).filter(
+            models.User.college_id == user.college_id,
+            models.User.is_active.is_(True),
+            models.User.role == models.UserRole.SUPER_ADMIN,
+        )
+        if user.department_id is not None:
+            reviewers = reviewers.union(
+                db.query(models.User).filter(
+                    models.User.college_id == user.college_id,
+                    models.User.department_id == user.department_id,
+                    models.User.role == models.UserRole.HOD,
+                    models.User.is_active.is_(True),
+                )
+            )
+        for reviewer in reviewers.all():
+            db.add(
+                models.Notification(
+                    user_id=reviewer.id,
+                    college_id=user.college_id,
+                    title="New leave application",
+                    message=f"{user.full_name} submitted a leave request for {total_days} working day(s).",
+                    type="info",
+                    action_url="/admin/leave",
+                )
+            )
+        db.commit()
+        return {
+            "id": application.id,
+            "status": application.status.value,
+            "total_days": application.total_days,
+        }
+
+    @app.get("/leave/applications")
+    def list_leave_applications(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        query = (
+            db.query(models.LeaveApplication, models.User, models.LeaveType)
+            .join(models.User, models.User.id == models.LeaveApplication.user_id)
+            .join(models.LeaveType, models.LeaveType.id == models.LeaveApplication.leave_type_id)
+            .filter(models.LeaveApplication.college_id == user.college_id)
+        )
+        if user.role == models.UserRole.SUPER_ADMIN:
+            pass
+        elif user.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == user.department_id)
+        else:
+            query = query.filter(models.LeaveApplication.user_id == user.id)
+        rows = query.order_by(models.LeaveApplication.created_at.desc()).limit(500).all()
+        return [
+            {
+                "id": application.id,
+                "employee": {"id": employee.id, "name": employee.full_name, "employee_id": employee.employee_id},
+                "leave_type": {"id": leave_type.id, "name": leave_type.name},
+                "start_date": application.start_date,
+                "end_date": application.end_date,
+                "total_days": application.total_days,
+                "reason": application.reason,
+                "status": application.status.value,
+                "reviewed_at": application.reviewed_at,
+                "review_remarks": application.review_remarks,
+                "created_at": application.created_at,
+            }
+            for application, employee, leave_type in rows
+        ]
+
+    @app.post("/leave/applications/{application_id}/review")
+    def review_leave_application(
+        application_id: int,
+        payload: LeaveReview,
+        request: Request,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        application = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.id == application_id,
+                models.LeaveApplication.college_id == admin.college_id,
+                models.LeaveApplication.status == models.LeaveStatus.PENDING,
+            )
+            .with_for_update()
+            .first()
+        )
+        if application is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
+        employee = db.query(models.User).filter(models.User.id == application.user_id).first()
+        if employee is None or not _user_can_review(admin, employee) or employee.id == admin.id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
+
+        new_status = models.LeaveStatus.APPROVED if payload.approved else models.LeaveStatus.REJECTED
+        application.status = new_status
+        application.reviewed_by = admin.id
+        application.reviewed_at = _utcnow()
+        application.review_remarks = (payload.remarks or "").strip() or None
+        if payload.approved:
+            overlap = (
+                db.query(models.LeaveApplication.id)
+                .filter(
+                    models.LeaveApplication.id != application.id,
+                    models.LeaveApplication.user_id == employee.id,
+                    models.LeaveApplication.status == models.LeaveStatus.APPROVED,
+                    models.LeaveApplication.start_date <= application.end_date,
+                    models.LeaveApplication.end_date >= application.start_date,
+                )
+                .first()
+            )
+            if overlap:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The requested dates overlap another approved leave.")
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="leave.application_reviewed",
+                resource_type="leave_application",
+                resource_id=application.id,
+                new_value={"status": new_status.value, "remarks": application.review_remarks},
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.add(
+            models.Notification(
+                user_id=employee.id,
+                college_id=admin.college_id,
+                title="Leave application reviewed",
+                message=(
+                    "Your leave application was approved."
+                    if payload.approved
+                    else f"Your leave application was rejected. {application.review_remarks or ''}".strip()
+                ),
+                type="success" if payload.approved else "warning",
+            )
+        )
+        db.commit()
+        return {"id": application.id, "status": application.status.value}
+
+    @app.post("/leave/applications/{application_id}/cancel")
+    def cancel_leave_application(
+        application_id: int,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        application = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.id == application_id,
+                models.LeaveApplication.user_id == user.id,
+                models.LeaveApplication.college_id == user.college_id,
+                models.LeaveApplication.status == models.LeaveStatus.PENDING,
+            )
+            .with_for_update()
+            .first()
+        )
+        if application is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
+        application.status = models.LeaveStatus.CANCELLED
+        application.updated_at = _utcnow()
+        db.commit()
+        return {"id": application.id, "status": application.status.value}
+
+    @app.get("/notifications")
+    def list_notifications(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        notifications = (
+            db.query(models.Notification)
+            .filter(
+                models.Notification.user_id == user.id,
+                models.Notification.college_id == user.college_id,
+            )
+            .order_by(models.Notification.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        return [
+            {
+                "id": item.id,
+                "title": item.title,
+                "message": item.message,
+                "type": item.type,
+                "is_read": item.is_read,
+                "action_url": item.action_url,
+                "created_at": item.created_at,
+            }
+            for item in notifications
+        ]
+
+    @app.post("/notifications/{notification_id}/read", status_code=status.HTTP_204_NO_CONTENT)
+    def mark_notification_read(
+        notification_id: int,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        notification = (
+            db.query(models.Notification)
+            .filter(
+                models.Notification.id == notification_id,
+                models.Notification.user_id == user.id,
+                models.Notification.college_id == user.college_id,
+            )
+            .first()
+        )
+        if notification is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+        notification.is_read = True
+        db.commit()
+
+    return app
 
 
-def get_faculty_details_by_id(db: Session, faculty_id: str):
-    user = db.query(models.User).filter(
-        models.User.faculty_id == faculty_id
-    ).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="Faculty not found")
-
-    rows = db.query(models.Attendance).filter(
-        models.Attendance.user_id == user.id
-    ).order_by(models.Attendance.id.desc()).all()
-
-    total_seconds = 0
-    latest_attendance = rows[0] if rows else None
-    break_rows = []
-
-    for row in rows:
-        if row.punch_in and row.punch_out:
-            total_seconds += int((row.punch_out - row.punch_in).total_seconds())
-
-        attendance_breaks = db.query(models.Break).filter(
-            models.Break.attendance_id == row.id,
-            models.Break.break_in.is_not(None),
-        ).order_by(models.Break.id.asc()).all()
-        for item in attendance_breaks:
-            if item.break_in and item.break_out:
-                duration = int((item.break_out - item.break_in).total_seconds())
-                item_duration_minutes = max(0, int(duration / 60))
-                break_rows.append({
-                    "in": item.break_in.strftime("%I:%M %p"),
-                    "out": item.break_out.strftime("%I:%M %p"),
-                    "duration_minutes": item_duration_minutes,
-                })
-
-    total_minutes = max(0, int(total_seconds / 60))
-    break_minutes = sum(item["duration_minutes"] for item in break_rows)
-
-    return {
-        "name": user.name,
-        "faculty_id": user.faculty_id,
-        "punch_in": latest_attendance.punch_in.strftime("%I:%M %p") if latest_attendance and latest_attendance.punch_in else "--",
-        "punch_out": latest_attendance.punch_out.strftime("%I:%M %p") if latest_attendance and latest_attendance.punch_out else "--",
-        "total_work_minutes": total_minutes,
-        "total_break_minutes": break_minutes,
-        "breaks": break_rows,
-    }
-
-
-@app.get("/hod/faculty-details/{faculty_id}")
-def get_faculty_details(faculty_id: str, db: Session = Depends(get_db)):
-    return get_faculty_details_by_id(db, faculty_id)
-
-
-@app.get("/hod/leave-requests")
-def get_leave_requests(db: Session = Depends(get_db)):
-    requests = db.query(models.LeaveRequest).order_by(models.LeaveRequest.created_at.desc()).all()
-    payload = []
-    for item in requests:
-        user = db.query(models.User).filter(models.User.id == item.user_id).first()
-        payload.append({
-            "id": item.id,
-            "user_id": item.user_id,
-            "faculty_id": user.faculty_id if user else "N/A",
-            "name": user.name if user else "Unknown",
-            "leave_type": item.leave_type,
-            "reason": item.reason,
-            "status": item.status,
-            "start_date": item.start_date.isoformat() if item.start_date else None,
-            "end_date": item.end_date.isoformat() if item.end_date else None,
-        })
-    return payload
-
-# Leave Management
-@app.post("/leave/apply")
-def apply_leave(leave: schemas.LeaveRequestCreate, db: Session = Depends(get_db)):
-    db_leave = models.LeaveRequest(**leave.dict())
-    db.add(db_leave)
-    db.commit()
-    db.refresh(db_leave)
-    return db_leave
-
-@app.get("/leave/status/{user_id}")
-def get_leave_status(user_id: int, db: Session = Depends(get_db)):
-    return get_leave_status_for_user(db, user_id)
-
-
-@app.patch("/leave/{leave_id}/status")
-def update_leave_status(leave_id: int, payload: schemas.LeaveStatusUpdate, db: Session = Depends(get_db)):
-    leave_request = db.query(models.LeaveRequest).filter(models.LeaveRequest.id == leave_id).first()
-    if not leave_request:
-        raise HTTPException(status_code=404, detail="Leave request not found")
-
-    leave_request.status = payload.status.strip().title()
-    db.commit()
-    db.refresh(leave_request)
-    return {
-        "id": leave_request.id,
-        "user_id": leave_request.user_id,
-        "status": leave_request.status,
-        "message": "Leave status updated successfully",
-    }
-
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+app = create_app()

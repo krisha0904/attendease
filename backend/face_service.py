@@ -1,147 +1,153 @@
 import base64
-import io
-import json
 import os
+import threading
+from pathlib import Path
 
+import cv2
 import numpy as np
-import requests
-from PIL import Image
+from cryptography.fernet import Fernet, InvalidToken
 
-try:
-    import cv2
-    cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-    face_cascade = cv2.CascadeClassifier(cascade_path)
-    OPENCV_AVAILABLE = True
-except Exception as exc:  # pragma: no cover - optional dependency in some environments
-    cv2 = None
-    face_cascade = None
-    OPENCV_AVAILABLE = False
-    print(f"Warning: OpenCV face detection not fully available: {exc}")
-
-AZURE_FACE_ENDPOINT = os.getenv("AZURE_FACE_ENDPOINT")
-AZURE_FACE_KEY = os.getenv("AZURE_FACE_KEY")
+MODEL_DIR = Path(__file__).parent / "assets" / "face_models"
+DETECTOR_PATH = MODEL_DIR / "face_detection_yunet_2023mar.onnx"
+RECOGNIZER_PATH = MODEL_DIR / "face_recognition_sface_2021dec.onnx"
+_model_lock = threading.Lock()
+_inference_lock = threading.Lock()
+_detector = None
+_recognizer = None
 
 
-def _decode_image_from_base64(base64_str: str):
-    img_data = base64.b64decode(base64_str.split(',')[-1])
-    return Image.open(io.BytesIO(img_data)).convert("RGB")
+class FaceCaptureError(ValueError):
+    pass
 
 
-def _azure_face_id(base64_str: str):
-    if not AZURE_FACE_ENDPOINT or not AZURE_FACE_KEY:
-        return None
-
-    try:
-        image_bytes = base64.b64decode(base64_str.split(',')[-1])
-        endpoint = AZURE_FACE_ENDPOINT.rstrip('/')
-        url = f"{endpoint}/face/v1.0/detect?returnFaceId=true&returnFaceLandmarks=false&returnFaceAttributes=emotion"
-        headers = {
-            "Ocp-Apim-Subscription-Key": AZURE_FACE_KEY,
-            "Content-Type": "application/octet-stream",
-        }
-        response = requests.post(url, headers=headers, data=image_bytes, timeout=20)
-        response.raise_for_status()
-        data = response.json()
-        if not data:
-            return None
-        face_id = data[0].get('faceId')
-        return face_id
-    except Exception as exc:
-        print(f"Azure Face API detection failed: {exc}")
-        return None
+class FaceServiceUnavailable(RuntimeError):
+    pass
 
 
-def _opencv_face_embedding(image: Image.Image):
-    if cv2 is None or face_cascade is None:
-        return None
-
-    img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.1, 4)
-
-    if len(faces) == 0:
-        return None
-
-    x, y, w, h = faces[0]
-    face_crop = gray[y:y + h, x:x + w]
-    resized = cv2.resize(face_crop, (64, 64), interpolation=cv2.INTER_AREA)
-    hist = cv2.calcHist([resized], [0], None, [16], [0, 256])
-    hist = cv2.normalize(hist, hist).flatten().astype(np.float32)
-    return hist
-
-
-def get_face_embedding(base64_str):
-    """Return a real face embedding or Azure face ID if cloud credentials are configured."""
-    if not base64_str:
-        return None
-
-    azure_face_id = _azure_face_id(base64_str)
-    if azure_face_id:
-        return {"provider": "azure", "face_id": azure_face_id}
-
-    try:
-        img = _decode_image_from_base64(base64_str)
-    except Exception as exc:
-        print(f"Error decoding face image: {exc}")
-        return None
-
-    if OPENCV_AVAILABLE:
+def _load_models():
+    global _detector, _recognizer
+    if _detector is not None and _recognizer is not None:
+        return _detector, _recognizer
+    with _model_lock:
+        if _detector is not None and _recognizer is not None:
+            return _detector, _recognizer
+        if not DETECTOR_PATH.is_file() or not RECOGNIZER_PATH.is_file():
+            raise FaceServiceUnavailable("Face recognition model files are missing.")
         try:
-            embedding = _opencv_face_embedding(img)
-            if embedding is not None:
-                return embedding
-        except Exception as exc:
-            print(f"OpenCV embedding failed: {exc}")
+            detector = cv2.FaceDetectorYN_create(
+                str(DETECTOR_PATH),
+                "",
+                (320, 320),
+                0.9,
+                0.3,
+                5000,
+            )
+            recognizer = cv2.FaceRecognizerSF_create(str(RECOGNIZER_PATH), "")
+        except cv2.error as exc:
+            raise FaceServiceUnavailable("The installed OpenCV build cannot load the face models.") from exc
+        _detector, _recognizer = detector, recognizer
+        return _detector, _recognizer
 
-    return None
 
-
-def verify_faces(stored_embedding, current_embedding, threshold=0.6):
-    """Compare two face embeddings or Azure face IDs using the real provider when available."""
+def _decode_image(image_data: str) -> np.ndarray:
+    if not image_data:
+        raise FaceCaptureError("A face image is required.")
+    encoded = image_data.split(",", 1)[-1]
+    if len(encoded) > 7_000_000:
+        raise FaceCaptureError("The face image exceeds the 5 MB limit.")
     try:
-        if stored_embedding is None or current_embedding is None:
-            return False
+        raw = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error) as exc:
+        raise FaceCaptureError("The face image is not valid base64.") from exc
+    if len(raw) > 5 * 1024 * 1024:
+        raise FaceCaptureError("The face image exceeds the 5 MB limit.")
+    image = cv2.imdecode(np.frombuffer(raw, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None or image.ndim != 3:
+        raise FaceCaptureError("The face image could not be decoded.")
+    height, width = image.shape[:2]
+    if width < 160 or height < 160:
+        raise FaceCaptureError("The face image resolution is too low.")
+    return image
 
-        if isinstance(stored_embedding, str):
-            stored_embedding = json.loads(stored_embedding)
-        if isinstance(current_embedding, str):
-            current_embedding = json.loads(current_embedding)
 
-        if isinstance(stored_embedding, dict) and stored_embedding.get('provider') == 'azure':
-            face_id_1 = stored_embedding.get('face_id')
-            face_id_2 = current_embedding.get('face_id') if isinstance(current_embedding, dict) else None
-            if face_id_1 and face_id_2 and AZURE_FACE_ENDPOINT and AZURE_FACE_KEY:
-                url = f"{AZURE_FACE_ENDPOINT.rstrip('/')}/face/v1.0/verify"
-                payload = {"faceId1": face_id_1, "faceId2": face_id_2}
-                headers = {"Ocp-Apim-Subscription-Key": AZURE_FACE_KEY, "Content-Type": "application/json"}
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
-                if response.status_code == 200:
-                    data = response.json()
-                    return bool(data.get('isIdentical')) and float(data.get('confidence', 0)) >= 0.5
-                raise ValueError(response.text)
+def embedding_from_base64(image_data: str) -> np.ndarray:
+    image = _decode_image(image_data)
+    height, width = image.shape[:2]
+    detector, recognizer = _load_models()
+    with _inference_lock:
+        detector.setInputSize((width, height))
+        _, faces = detector.detect(image)
+    if faces is None or len(faces) == 0:
+        raise FaceCaptureError("No face was detected. Improve lighting and try again.")
+    if len(faces) != 1:
+        raise FaceCaptureError("Exactly one face must be visible.")
 
-        if isinstance(current_embedding, dict) and current_embedding.get('provider') == 'azure':
-            face_id_2 = current_embedding.get('face_id')
-            if isinstance(stored_embedding, dict) and stored_embedding.get('provider') == 'azure':
-                face_id_1 = stored_embedding.get('face_id')
-                if face_id_1 and face_id_2 and AZURE_FACE_ENDPOINT and AZURE_FACE_KEY:
-                    url = f"{AZURE_FACE_ENDPOINT.rstrip('/')}/face/v1.0/verify"
-                    payload = {"faceId1": face_id_1, "faceId2": face_id_2}
-                    headers = {"Ocp-Apim-Subscription-Key": AZURE_FACE_KEY, "Content-Type": "application/json"}
-                    response = requests.post(url, headers=headers, json=payload, timeout=20)
-                    if response.status_code == 200:
-                        data = response.json()
-                        return bool(data.get('isIdentical')) and float(data.get('confidence', 0)) >= 0.5
+    face = faces[0]
+    x, y, face_width, face_height = face[:4]
+    if min(face_width, face_height) < 100:
+        raise FaceCaptureError("Move closer so your face is clearly visible.")
+    if float(face[-1]) < 0.9:
+        raise FaceCaptureError("Face visibility is insufficient. Center your face and try again.")
 
-        stored = np.asarray(stored_embedding, dtype=np.float32)
-        current = np.asarray(current_embedding, dtype=np.float32)
+    left = max(0, int(x))
+    top = max(0, int(y))
+    right = min(width, int(x + face_width))
+    bottom = min(height, int(y + face_height))
+    face_image = image[top:bottom, left:right]
+    if face_image.size == 0:
+        raise FaceCaptureError("Face framing is invalid. Center your face and try again.")
+    gray_face = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+    if float(np.mean(gray_face)) < 35 or float(np.mean(gray_face)) > 220:
+        raise FaceCaptureError("Face lighting is too dark or too bright.")
+    if float(cv2.Laplacian(gray_face, cv2.CV_64F).var()) < 25:
+        raise FaceCaptureError("The image is blurry. Hold the camera steady and try again.")
 
-        if stored.shape != current.shape:
-            return False
+    with _inference_lock:
+        aligned = recognizer.alignCrop(image, face)
+        feature = np.asarray(recognizer.feature(aligned), dtype=np.float32).reshape(-1)
+    norm = float(np.linalg.norm(feature))
+    if not np.isfinite(norm) or norm == 0:
+        raise FaceServiceUnavailable("The face model returned an invalid embedding.")
+    return feature / norm
 
-        distance = np.linalg.norm(stored - current)
-        return float(distance) <= threshold
-    except Exception as exc:
-        print(f"Error comparing face embeddings: {exc}")
-        return False
 
+def _fernet() -> Fernet:
+    key = os.getenv("BIOMETRIC_ENCRYPTION_KEY", "")
+    if not key:
+        raise FaceServiceUnavailable("Biometric encryption is not configured.")
+    try:
+        return Fernet(key.encode("ascii"))
+    except (ValueError, TypeError) as exc:
+        raise FaceServiceUnavailable("BIOMETRIC_ENCRYPTION_KEY is invalid.") from exc
+
+
+def encrypt_embedding(embedding: np.ndarray) -> str:
+    vector = np.asarray(embedding, dtype=np.float32)
+    if vector.shape != (128,) or not np.isfinite(vector).all():
+        raise FaceServiceUnavailable("The face embedding has an unexpected format.")
+    return _fernet().encrypt(vector.tobytes()).decode("ascii")
+
+
+def decrypt_embedding(encrypted_embedding: str) -> np.ndarray:
+    try:
+        vector = np.frombuffer(_fernet().decrypt(encrypted_embedding.encode("ascii")), dtype=np.float32)
+    except (InvalidToken, ValueError, UnicodeEncodeError) as exc:
+        raise FaceServiceUnavailable("The stored biometric template cannot be decrypted.") from exc
+    if vector.shape != (128,) or not np.isfinite(vector).all():
+        raise FaceServiceUnavailable("The stored biometric template is invalid.")
+    return vector
+
+
+def compare_embeddings(stored: np.ndarray, current: np.ndarray) -> tuple[bool, float]:
+    stored_vector = np.asarray(stored, dtype=np.float32)
+    current_vector = np.asarray(current, dtype=np.float32)
+    if stored_vector.shape != (128,) or current_vector.shape != (128,):
+        return False, 0.0
+    score = float(np.dot(stored_vector, current_vector))
+    try:
+        threshold = float(os.getenv("FACE_SIMILARITY_THRESHOLD", "0.363"))
+    except ValueError as exc:
+        raise FaceServiceUnavailable("FACE_SIMILARITY_THRESHOLD must be a number.") from exc
+    if not -1.0 <= threshold <= 1.0:
+        raise FaceServiceUnavailable("FACE_SIMILARITY_THRESHOLD must be between -1 and 1.")
+    return bool(np.isfinite(score) and score >= threshold), score

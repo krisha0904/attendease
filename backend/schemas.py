@@ -2,19 +2,41 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 class UserCreate(BaseModel):
+    faculty_id: str
+    name: str
+    email: str
+    phone: str
+    role: str = "visiting_faculty"
+    department_id: int = 1
+    specialization: Optional[str] = None
+    password: Optional[str] = None
+    face_image: Optional[str] = None
+
+class UserResponse(BaseModel):
+    id: int
     faculty_id: str
     name: str
     email: str
     phone: str
     role: str
     department_id: int
-    face_image: Optional[str] = None
+    specialization: Optional[str] = None
+    is_active: Optional[int] = 1
+    is_face_enrolled: Optional[int] = 0
 
-class UserResponse(UserCreate):
-    id: int
     class Config:
         from_attributes = True
+
+class GeofenceUpdateRequest(BaseModel):
+    department_id: int = 1
+    lat: float
+    lng: float
+    radius: float
 
 class OTPVerifyRequest(BaseModel):
     phone: Optional[str] = None
@@ -31,6 +53,11 @@ class PunchInRequest(BaseModel):
 
 class PunchOutRequest(BaseModel):
     user_id: int
+    lat: float
+    lng: float
+    face_image_base64: str
+    out_of_range_reason: Optional[str] = None
+    out_of_range_remarks: Optional[str] = None
 
 class AdminOTPSendRequest(BaseModel):
     user_id: int

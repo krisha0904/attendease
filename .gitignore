@@ -7,8 +7,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+.venv-py312/
 venv/
 ENV/
+*.db
+*.sqlite3
 
 # IDEs
 .idea/
