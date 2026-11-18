@@ -105,6 +105,22 @@ def live_capture(idempotency_key):
     }
 
 
+def test_attendance_clock_defaults_to_campus_timezone(monkeypatch):
+    observed_timezone = {}
+
+    class FixedClock:
+        @staticmethod
+        def now(tz=None):
+            observed_timezone["zone"] = tz
+            return datetime(2026, 1, 7, 18, 30, tzinfo=tz)
+
+    monkeypatch.delenv("ATTENDANCE_TIMEZONE", raising=False)
+    monkeypatch.setattr(main, "datetime", FixedClock)
+
+    assert main._attendance_now() == datetime(2026, 1, 7, 18, 30)
+    assert observed_timezone["zone"].key == "Asia/Kolkata"
+
+
 def test_password_authenticated_attendance_state_transitions_and_idempotent_retries(attendance_client):
     client, test_sessions, monkeypatch = attendance_client
     monkeypatch.setattr(main, "_verify_face", lambda *args, **kwargs: (True, 1.0, 0.99, object()))
@@ -175,7 +191,17 @@ def test_weekly_and_approved_additional_lecture_attendance_lifecycle(attendance_
             reason="Exam preparation",
             status="approved",
         )
-        db.add_all((weekly, additional))
+        missed = models.WeeklyLecture(
+            college_id=college_id,
+            department_id=department_id,
+            user_id=faculty_id,
+            subject="Unattended Seminar",
+            day_of_week=0,
+            start_time=time(11, 30),
+            end_time=time(12, 30),
+            is_active=True,
+        )
+        db.add_all((weekly, additional, missed))
         db.commit()
         weekly_id, additional_id = weekly.id, additional.id
 
@@ -187,8 +213,25 @@ def test_weekly_and_approved_additional_lecture_attendance_lifecycle(attendance_
         headers=headers,
     )
     assert schedule.status_code == 200, schedule.text
-    assert [item["source_type"] for item in schedule.json()] == ["weekly", "additional"]
+    assert [item["source_type"] for item in schedule.json()] == ["weekly", "additional", "weekly"]
     assert schedule.json()[0]["can_punch_in"] is False
+    assert schedule.json()[0]["scheduled_minutes"] == 60
+    assert schedule.json()[0]["not_worked_minutes"] == 0
+    overview = client.get("/lecture-attendance/overview", headers=headers)
+    assert overview.status_code == 200, overview.text
+    assert overview.json()["today"]["assigned_lectures"] == 3
+    assert overview.json()["today"]["attended_lectures"] == 0
+    assert overview.json()["today"]["upcoming_lectures"] == 3
+    assert overview.json()["week"]["scheduled_minutes"] == 150
+    assert overview.json()["week"]["worked_minutes"] == 0
+    assert overview.json()["next_lecture"]["subject"] == "Data Structures"
+    initial_calendar = client.get(
+        "/lecture-attendance/calendar",
+        params={"start_date": "2026-01-05", "end_date": "2026-01-06"},
+        headers=headers,
+    )
+    assert initial_calendar.status_code == 200, initial_calendar.text
+    assert [item["status"] for item in initial_calendar.json()] == ["scheduled", "no_lecture"]
 
     weekly_action = {
         "source_type": "weekly",
@@ -237,12 +280,31 @@ def test_weekly_and_approved_additional_lecture_attendance_lifecycle(attendance_
     )
     assert additional_out.status_code == 200, additional_out.text
 
+    now[0] = datetime(2026, 1, 5, 12, 31)
     updated_schedule = client.get(
         "/lecture-attendance/mine",
         params={"lecture_date": lecture_date},
         headers=headers,
     )
-    assert [item["status"] for item in updated_schedule.json()] == ["completed", "completed"]
+    assert [item["status"] for item in updated_schedule.json()] == ["completed", "completed", "missed"]
+    assert [item["worked_minutes"] for item in updated_schedule.json()] == [60, 30, 0]
+    assert [item["not_worked_minutes"] for item in updated_schedule.json()] == [0, 0, 60]
+    assert sum(item["scheduled_minutes"] for item in updated_schedule.json()) == 150
+    final_overview = client.get("/lecture-attendance/overview", headers=headers)
+    assert final_overview.status_code == 200
+    assert final_overview.json()["today"]["attended_lectures"] == 2
+    assert final_overview.json()["today"]["upcoming_lectures"] == 0
+    assert final_overview.json()["week"]["worked_minutes"] == 90
+    assert final_overview.json()["week"]["not_worked_minutes"] == 60
+    assert final_overview.json()["next_lecture"] is None
+    final_calendar = client.get(
+        "/lecture-attendance/calendar",
+        params={"start_date": "2026-01-05", "end_date": "2026-01-06"},
+        headers=headers,
+    )
+    assert [item["status"] for item in final_calendar.json()] == ["missed", "no_lecture"]
+    assert final_calendar.json()[0]["attended_lectures"] == 2
+    assert final_calendar.json()[0]["missed_lectures"] == 1
     with test_sessions() as db:
         assert db.query(models.LectureAttendanceRecord).count() == 2
         assert db.query(models.LectureAttendanceEvent).count() == 4

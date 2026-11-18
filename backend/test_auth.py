@@ -130,8 +130,6 @@ def test_login_otp_uses_configured_validity_and_respects_resend_cooldown(client,
 @pytest.mark.parametrize(
     ("role", "portal", "wrong_portal"),
     [
-        (models.UserRole.SUPER_ADMIN, "admin", "user"),
-        (models.UserRole.HOD, "admin", "user"),
         (models.UserRole.FACULTY, "user", "admin"),
         (models.UserRole.STAFF, "user", "admin"),
     ],
@@ -157,6 +155,52 @@ def test_login_otp_is_limited_to_the_correct_portal(client, monkeypatch, role, p
     correct_login = test_client.post("/auth/otp/verify", json=payload)
     assert correct_login.status_code == 200
     assert correct_login.json()["user"]["role"] == role.value
+
+
+def test_admin_username_login_identifies_college_without_email_otp(client, monkeypatch):
+    test_client, test_sessions = client
+    with test_sessions() as db:
+        north_id, _, north_email = create_college(
+            db, "NORTH", "north-admin@example.edu", models.UserRole.SUPER_ADMIN
+        )
+        south_id, _, south_email = create_college(
+            db, "SOUTH", "south-admin@example.edu", models.UserRole.HOD
+        )
+        north = db.query(models.User).filter_by(email=north_email).one()
+        north.username = "north.admin"
+        north.password_hash = hash_password("North-Admin-Password-123")
+        south = db.query(models.User).filter_by(email=south_email).one()
+        south.username = "south.hod"
+        south.password_hash = hash_password("South-HOD-Password-123")
+        db.commit()
+
+    sent_codes = []
+    monkeypatch.setattr(main, "_send_otp_email", lambda *args, **kwargs: sent_codes.append(args))
+    otp_request = test_client.post("/auth/otp/request", json={"email": north_email})
+    assert otp_request.status_code == 202
+    assert not sent_codes
+
+    north_login = test_client.post(
+        "/auth/admin-login",
+        json={"username": "NORTH.ADMIN", "password": "North-Admin-Password-123"},
+    )
+    south_login = test_client.post(
+        "/auth/admin-login",
+        json={"username": "south.hod", "password": "South-HOD-Password-123"},
+    )
+    assert north_login.status_code == 200
+    assert north_login.json()["user"]["college_id"] == north_id
+    assert south_login.status_code == 200
+    assert south_login.json()["user"]["college_id"] == south_id
+    assert north_login.json()["user"]["username"] == "north.admin"
+    assert test_client.post(
+        "/auth/admin-login",
+        json={"username": "north.admin", "password": "wrong-password"},
+    ).status_code == 401
+    assert test_client.post(
+        "/auth/login",
+        json={"email": north_email, "password": "North-Admin-Password-123"},
+    ).status_code == 401
 
 
 def test_otp_validity_policy_is_limited_to_two_through_five_minutes():
@@ -476,7 +520,17 @@ def test_admin_user_management_is_role_and_tenant_scoped(client, monkeypatch):
         )
         _, department_b_id, _ = create_college(db, "B", "other@example.edu")
 
-    tokens, _ = login_with_otp(test_client, test_sessions, monkeypatch, admin_email)
+    with test_sessions() as db:
+        admin = db.query(models.User).filter_by(email=admin_email).one()
+        admin.username = "college-a.admin"
+        admin.password_hash = hash_password("College-Admin-Password-123")
+        db.commit()
+    admin_login = test_client.post(
+        "/auth/admin-login",
+        json={"username": "college-a.admin", "password": "College-Admin-Password-123"},
+    )
+    assert admin_login.status_code == 200
+    tokens = admin_login.json()
     headers = {"Authorization": f"Bearer {tokens['access_token']}"}
 
     response = test_client.get("/admin/users", headers=headers)

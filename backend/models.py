@@ -147,6 +147,7 @@ class User(Base):
     employee_id = Column(String(50), nullable=False)
     full_name = Column(String(255), nullable=False)
     email = Column(String(255), nullable=False)
+    username = Column(String(150), nullable=True)
     password_hash = Column(String(255))
     email_verified = Column(Boolean, default=True, server_default=true(), nullable=False)
     phone = Column(String(20))
@@ -188,6 +189,7 @@ class User(Base):
     __table_args__ = (
         UniqueConstraint("college_id", "email", name="uq_user_email"),
         UniqueConstraint("college_id", "employee_id", name="uq_employee_id"),
+        Index("uq_user_username", "username", unique=True),
     )
 
 

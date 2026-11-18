@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
 import {
   Activity, ArrowDownToLine, Bell, Building2, CalendarDays, Camera, Check, ChevronRight,
-  BookOpen, CalendarPlus, CircleHelp, Clock3, Fingerprint, FolderOpen, GraduationCap,
+  BookOpen, CalendarPlus, CircleHelp, Clock3, Fingerprint, FolderOpen, MapPin,
   KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserRound, Users, X,
 } from 'lucide-react'
 import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens } from './api'
@@ -14,6 +14,7 @@ type User = {
   employee_id: string
   full_name: string
   email: string
+  username: string | null
   college_id: number
   department_id: number | null
   shift_id: number | null
@@ -33,6 +34,8 @@ type Attendance = {
   net_working_minutes: number
   is_late: boolean
   late_by_minutes: number
+  is_early_departure: boolean
+  overtime_minutes: number
   active_break_started_at: string | null
 }
 type Policy = {
@@ -73,26 +76,43 @@ type LectureScheduleItem = {
   status: 'completed' | 'in_progress' | 'upcoming' | 'scheduled' | 'missed'
   punch_in_time: string | null
   punch_out_time: string | null
+  scheduled_minutes: number
+  worked_minutes: number
+  not_worked_minutes: number
   can_punch_in: boolean
   can_punch_out: boolean
   punch_out_window_closed: boolean
 }
-type DashboardData = {
-  user: User
-  college: { name: string; code: string; department: string | null }
-  today: Attendance | null
-  recent: Attendance[]
-  today_schedule: WeeklyLecture[]
-  monthly: {
-    month: string
-    hours_worked: number
-    completed_days: number
-    scheduled_lectures: number
-    hours_by_month: Array<{ month: string; hours: number }>
+type LectureCalendarDay = {
+  date: string
+  status: 'attended' | 'missed' | 'scheduled' | 'no_lecture'
+  scheduled_lectures: number
+  attended_lectures: number
+  missed_lectures: number
+}
+type LectureAttendanceOverview = {
+  today: {
+    date: string
+    assigned_lectures: number
+    attended_lectures: number
+    upcoming_lectures: number
+    lectures: LectureScheduleItem[]
   }
-  unread_notifications: number
-  recent_notifications: Array<{ id: number; title: string; message: string; type: string; is_read: boolean; created_at: string }>
-  pending_additional_lectures: number
+  week: {
+    scheduled_minutes: number
+    worked_minutes: number
+    not_worked_minutes: number
+  }
+  next_lecture: LectureScheduleItem | null
+}
+type NotificationEntry = {
+  id: number
+  title: string
+  message: string
+  type: string
+  is_read: boolean
+  action_url: string | null
+  created_at: string
 }
 type AdditionalLectureRequest = {
   id: number
@@ -116,6 +136,7 @@ type NavItem = { key: string; label: string; icon: typeof LayoutDashboard }
 
 const staffNavigation: NavItem[] = [
   { key: 'Dasboard ', label: 'Dasboard ', icon: LayoutDashboard },
+  { key: 'attendance_tracker', label: 'Attendance tracker', icon: Clock3 },
   { key: 'timetable', label: 'Timetable', icon: CalendarDays },
   { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
   { key: 'leave', label: 'Leave requests', icon: CalendarDays },
@@ -166,13 +187,6 @@ function localDate() {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 }
 
-function dateForCurrentWeekday(dayIndex: number) {
-  const date = new Date()
-  const todayIndex = (date.getDay() + 6) % 7
-  date.setDate(date.getDate() - todayIndex + dayIndex)
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
-}
-
 function formatDay(value: string) {
   return new Date(`${value}T12:00:00`).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })
 }
@@ -200,6 +214,7 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
   const [selectedCollegeId, setSelectedCollegeId] = useState('')
   const [collegeCode, setCollegeCode] = useState('')
   const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [verificationDigits, setVerificationDigits] = useState(['', '', '', '', '', ''])
   const verificationCode = verificationDigits.join('')
@@ -271,6 +286,26 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
       clearVerificationCode()
       setResendSeconds(60)
       setMode('login-verify')
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function signInAdmin(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError('')
+    try {
+      const { data } = await api.post('/auth/admin-login', { username, password })
+      const signedInUser = data.user as User
+      if (portalForRole(signedInUser.role) !== portal) {
+        setError(`This account must use the ${portalForRole(signedInUser.role)} sign-in portal.`)
+        return
+      }
+      saveTokens(data.access_token, data.refresh_token)
+      onLogin(signedInUser)
     } catch (requestError) {
       setError(errorMessage(requestError))
     } finally {
@@ -407,9 +442,9 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
         <div className="mobile-brand brand"><span className="brand-mark"><Activity size={20} /></span> AttendEase</div>
         <div className="eyebrow">{mode === 'login' ? (portal === 'admin' ? 'ADMIN SIGN-IN' : 'USER SIGN-IN') : isVerifying ? (isVerifyingLogin ? 'EMAIL SIGN-IN' : 'EMAIL VERIFICATION') : 'GET STARTED'}</div>
         <h2>{mode === 'login' ? (portal === 'admin' ? 'Admin portal sign in' : 'User portal sign in') : isVerifying ? (isVerifyingLogin ? 'Check your email' : 'Verify your email') : 'Create your account'}</h2>
-        <p className="muted">{mode === 'login' ? `Enter your registered college email to receive a secure ${portal === 'admin' ? 'admin' : 'user'} sign-in code.` : isVerifying ? `Enter the six-digit code sent to ${email}.` : 'Join your existing college with the College ID provided by your administrator.'}</p>
+        <p className="muted">{mode === 'login' ? (portal === 'admin' ? 'Enter your unique admin username and password. Your account is linked to your college.' : 'Enter your registered college email to receive a secure user sign-in code.') : isVerifying ? `Enter the six-digit code sent to ${email}.` : 'Join your existing college with the College ID provided by your administrator.'}</p>
         {message && <div className="notice notice-success"><Check size={16} />{message}</div>}
-        <form onSubmit={(event) => void (mode === 'login' ? requestSignInCode(event) : isVerifyingLogin ? verifySignInCode(event) : mode === 'register' ? register(event) : verifyEmail(event))} className="form-stack">
+        <form onSubmit={(event) => void (mode === 'login' ? (portal === 'admin' ? signInAdmin(event) : requestSignInCode(event)) : isVerifyingLogin ? verifySignInCode(event) : mode === 'register' ? register(event) : verifyEmail(event))} className="form-stack">
           {mode === 'register' && <>
             <label>College name
               <select value={selectedCollegeId} onChange={(event) => setSelectedCollegeId(event.target.value)} required disabled={collegesLoading || colleges.length === 0}>
@@ -425,9 +460,12 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
             <label>Employee ID<input value={employeeId} onChange={(event) => setEmployeeId(event.target.value)} required maxLength={50} /></label>
             <label>Phone number (optional)<input type="tel" value={phone} onChange={(event) => setPhone(event.target.value)} maxLength={20} autoComplete="tel" /></label>
           </>}
-          <label>Email address
+          {portal === 'admin' && mode === 'login' ? <>
+            <label>Admin username<input value={username} onChange={(event) => setUsername(event.target.value)} required minLength={3} maxLength={150} autoComplete="username" /></label>
+            <label>Password<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+          </> : portal === 'user' && <label>Email address>
             <input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required disabled={isVerifying} placeholder="you@college.edu" />
-          </label>
+          </label>}
           {mode === 'register' ? <label>Password
               <input type="password" autoComplete="new-password" minLength={12} value={password} onChange={(event) => setPassword(event.target.value)} required />
               <span className="table-subtext">Use at least 12 characters.</span>
@@ -458,14 +496,14 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
             </label> : null}
           {error && <div className="notice notice-error">{error}</div>}
           <button className="button button-primary button-wide" disabled={busy || (mode === 'register' && (collegesLoading || colleges.length === 0))}>
-            {busy ? (mode === 'login' ? 'Sending code…' : isVerifying ? 'Verifying…' : 'Registering…') : (mode === 'login' ? 'Send sign-in code' : isVerifyingLogin ? 'Verify and sign in' : isVerifyingEmail ? 'Verify email' : 'Create account')}
+            {busy ? (mode === 'login' ? (portal === 'admin' ? 'Signing in…' : 'Sending code…') : isVerifying ? 'Verifying…' : 'Registering…') : (mode === 'login' ? (portal === 'admin' ? 'Sign in' : 'Send sign-in code') : isVerifyingLogin ? 'Verify and sign in' : isVerifyingEmail ? 'Verify email' : 'Create account')}
             {!busy && <ChevronRight size={17} />}
           </button>
         </form>
         {isVerifying && <button className="button button-link auth-switch" type="button" disabled={busy || resendSeconds > 0} onClick={() => void (isVerifyingLogin ? resendSignInCode() : resendVerification())}>
           {resendSeconds > 0 ? `Resend code in 0:${String(resendSeconds).padStart(2, '0')}` : isVerifyingLogin ? 'Resend sign-in code' : 'Resend verification code'}
         </button>}
-        <div className="login-foot"><ShieldCheck size={15} /> {mode === 'login' ? 'Only active, verified email accounts can sign in.' : isVerifyingLogin ? 'Codes expire in 2–5 minutes based on your college’s settings and can only be used once.' : isVerifyingEmail ? 'Registration codes expire after five minutes and can only be used once.' : 'Only active colleges and matching College IDs are accepted.'}</div>
+        <div className="login-foot"><ShieldCheck size={15} /> {mode === 'login' ? (portal === 'admin' ? 'Admin usernames are unique and linked to one college.' : 'Only active, verified email accounts can sign in.') : isVerifyingLogin ? 'Codes expire in 2–5 minutes based on your college’s settings and can only be used once.' : isVerifyingEmail ? 'Registration codes expire after five minutes and can only be used once.' : 'Only active colleges and matching College IDs are accepted.'}</div>
         {isVerifyingLogin && <button className="button button-link auth-switch" type="button" disabled={busy} onClick={() => changeMode('login')}>Use a different email</button>}
         {portal === 'user' && (mode === 'login' || mode === 'register') ? <button className="button button-link auth-switch" type="button" onClick={() => changeMode(mode === 'login' ? 'register' : 'login')}>
           {mode === 'login' ? 'New here? Register' : 'Already registered? Sign in'}
@@ -544,33 +582,32 @@ function Dasboard ({ user, navigate }: { user: User; navigate: (page: string) =>
 }
 
 function UserDashboard({ user, navigate }: { user: User; navigate: (page: string) => void }) {
-  const { data, error, loading } = useReloadable(
-    () => fetchJson<DashboardData>('/dashboard/mine'),
-    `user-dashboard:${user.id}`,
-  )
-  const [selectedDay, setSelectedDay] = useState(() => (new Date().getDay() + 6) % 7)
-  const todayIndex = (new Date().getDay() + 6) % 7
-  const selectedDate = dateForCurrentWeekday(selectedDay)
+  const selectedDate = localDate()
   const {
-    data: selectedScheduleData,
-    error: scheduleError,
-    reload: reloadSchedule,
+    data: notifications,
+    error: notificationError,
+    reload: reloadNotifications,
   } = useReloadable(
-    async () => ({
-      lectureDate: selectedDate,
-      items: await fetchJson<LectureScheduleItem[]>(`/lecture-attendance/mine?lecture_date=${selectedDate}`),
-    }),
-    `dashboard-lecture-attendance:${user.id}:${selectedDate}`,
+    () => fetchJson<NotificationEntry[]>('/notifications'),
+    `dashboard-notifications:${user.id}`,
   )
-  const selectedLectures = selectedScheduleData?.lectureDate === selectedDate ? selectedScheduleData.items : null
-  const today = data?.today
-  const todayLectureCount = selectedDay === todayIndex && selectedLectures
-    ? selectedLectures.length
-    : data?.today_schedule.length || 0
-  const todayHours = ((today?.net_working_minutes || 0) / 60).toFixed(1)
-  const maxMonthlyHours = Math.max(1, ...(data?.monthly.hours_by_month.map((item) => item.hours) || []))
-  const todayLabel = new Intl.DateTimeFormat(undefined, { weekday: 'long', month: 'long', day: 'numeric' }).format(new Date())
-  const statusText = today ? statusLabel(today.status) : 'Not checked in'
+  const {
+    data: overview,
+    error: scheduleError,
+    reload: reloadOverview,
+  } = useReloadable(
+    () => fetchJson<LectureAttendanceOverview>('/lecture-attendance/overview'),
+    `dashboard-lecture-attendance:${user.id}`,
+  )
+  const selectedLectures = overview?.today.lectures || null
+  const nextLecture = overview?.next_lecture || null
+  const importantNotification = (notifications || [])
+    .filter((item) => !item.is_read)
+    .sort((left, right) => {
+      const priority = (type: string) => type === 'error' ? 2 : type === 'warning' ? 1 : 0
+      return priority(right.type) - priority(left.type)
+        || right.created_at.localeCompare(left.created_at)
+    })[0]
   const [lectureChallenge, setLectureChallenge] = useState<Challenge | null>(null)
   const [activeLectureAction, setActiveLectureAction] = useState<{
     schedule: LectureScheduleItem
@@ -579,6 +616,26 @@ function UserDashboard({ user, navigate }: { user: User; navigate: (page: string
   const [lectureActionBusy, setLectureActionBusy] = useState(false)
   const [lectureActionError, setLectureActionError] = useState('')
   const [lectureActionMessage, setLectureActionMessage] = useState('')
+  const [notificationBusy, setNotificationBusy] = useState(false)
+  const [notificationActionError, setNotificationActionError] = useState('')
+
+  useEffect(() => {
+    const timer = window.setInterval(reloadOverview, 30_000)
+    return () => window.clearInterval(timer)
+  }, [reloadOverview])
+
+  async function dismissNotification(notificationId: number) {
+    setNotificationBusy(true)
+    setNotificationActionError('')
+    try {
+      await api.post(`/notifications/${notificationId}/read`)
+      reloadNotifications()
+    } catch (requestError) {
+      setNotificationActionError(errorMessage(requestError))
+    } finally {
+      setNotificationBusy(false)
+    }
+  }
 
   async function beginLectureAction(schedule: LectureScheduleItem, action: 'punch_in' | 'punch_out') {
     setLectureActionError('')
@@ -615,7 +672,7 @@ function UserDashboard({ user, navigate }: { user: User; navigate: (page: string
       )
       setActiveLectureAction(null)
       setLectureChallenge(null)
-      reloadSchedule()
+      reloadOverview()
     } catch (requestError) {
       setLectureActionError(errorMessage(requestError))
       setActiveLectureAction(null)
@@ -629,124 +686,126 @@ function UserDashboard({ user, navigate }: { user: User; navigate: (page: string
     <div className="page-content user-dashboard">
       <div className="user-dashboard-welcome">
         <div>
-          <div className="eyebrow">{todayLabel}</div>
+          <div className="eyebrow">{formatDay(localDate())}</div>
           <h1>Welcome back, {user.full_name.split(' ')[0]}! <span aria-hidden="true">👋</span></h1>
-          <p>Here’s your teaching Dasboard  for today.</p>
-        </div>
-        <div className="college-summary">
-          <span className="college-summary-icon"><GraduationCap size={24} /></span>
-          <span><strong>{data?.college.name || 'Your college'}</strong><small>{data?.college.code || user.employee_id}{data?.college.department ? ` · ${data.college.department}` : ''}</small></span>
+          <p>Here’s your teaching schedule and lecture hours.</p>
         </div>
       </div>
-      {error && <ErrorBanner message={error} />}
-      {loading && !data ? <Loading /> : data ? (
-        <>
-          <div className="user-stat-grid">
-            <article className="user-stat-card stat-lectures">
-              <span className="user-stat-icon"><CalendarDays size={21} /></span>
-              <div><span className="user-stat-label">Today’s Lectures</span><strong>{todayLectureCount}</strong><small>{todayLectureCount === 1 ? 'scheduled lecture' : 'scheduled lectures'}</small></div>
-            </article>
-            <article className="user-stat-card stat-hours">
-              <span className="user-stat-icon"><Clock3 size={22} /></span>
-              <div><span className="user-stat-label">Today’s Hours</span><strong>{todayHours} hrs</strong><small>Net attendance hours</small></div>
-            </article>
-            <article className="user-stat-card stat-status">
-              <span className="user-stat-icon"><Check size={22} /></span>
-              <div className="user-stat-details"><span className="user-stat-label">Attendance Status</span><strong className="status-stat-value">{statusText}</strong><small>{today?.is_late ? `Late by ${today.late_by_minutes} minutes` : today?.punch_in_time ? `Punched in ${dateTime(today.punch_in_time)}` : 'No attendance recorded yet'}</small></div>
-              <button className="button button-primary user-punch-button" onClick={() => navigate('attendance')}><Clock3 size={15} />{today?.punch_in_time ? 'Workday Attendance' : 'Workday Punch In'}</button>
-            </article>
-          </div>
+      {notificationError && <ErrorBanner message={notificationError} />}
+      <div className="user-stat-grid">
+        <article className="user-stat-card stat-lectures">
+          <div className="user-stat-card-top"><span className="user-stat-icon"><CalendarDays size={21} /></span><span className="stat-chip stat-chip-blue">Today</span></div>
+          <strong>{overview?.today.assigned_lectures ?? '—'}</strong>
+          <span className="user-stat-label">Assigned Lectures</span>
+          <small>Today’s scheduled sessions</small>
+        </article>
+        <article className="user-stat-card stat-attended">
+          <div className="user-stat-card-top"><span className="user-stat-icon"><Check size={21} /></span><span className="stat-chip stat-chip-green">Completed</span></div>
+          <strong>{overview?.today.attended_lectures ?? '—'}</strong>
+          <span className="user-stat-label">Attended Lectures</span>
+          <small>Successfully completed</small>
+        </article>
+        <article className="user-stat-card stat-hours">
+          <div className="user-stat-card-top"><span className="user-stat-icon"><Clock3 size={21} /></span></div>
+          <strong>{overview ? `${(overview.week.scheduled_minutes / 60).toFixed(1)}` : '—'}</strong>
+          <span className="user-stat-label">Teaching Hours</span>
+          <small>Total scheduled this week</small>
+          <small className="stat-hours-detail">{overview
+            ? `${(overview.week.worked_minutes / 60).toFixed(1)} hrs worked · ${(overview.week.not_worked_minutes / 60).toFixed(1)} hrs not worked`
+            : 'Loading weekly hours…'}</small>
+        </article>
+        <article className="user-stat-card stat-upcoming">
+          <div className="user-stat-card-top"><span className="user-stat-icon"><CalendarPlus size={21} /></span></div>
+          <strong>{overview?.today.upcoming_lectures ?? '—'}</strong>
+          <span className="user-stat-label">Upcoming Lectures</span>
+          <small>Remaining today</small>
+        </article>
+      </div>
 
-          <div className="user-dashboard-grid user-dashboard-primary">
-            <section className="panel user-schedule-panel">
-              <div className="panel-heading">
-                <div><h3><CalendarDays size={18} /> Weekly Schedule</h3><p className="muted">{selectedDay === todayIndex ? `Today · ${todayLabel}` : formatDay(selectedDate)}</p></div>
+      <div className="user-dashboard-bottom-grid">
+        <section className="panel user-next-assigned-panel">
+          <div className="panel-heading"><div><h3><Clock3 size={18} /> Next Assigned Lecture</h3></div>
+            {nextLecture && <span className={`lecture-status ${nextLecture.status === 'in_progress' ? 'lecture-status-live' : ''}`}>{statusLabel(nextLecture.status)}</span>}
+          </div>
+          {scheduleError && !overview ? <ErrorBanner message={scheduleError} /> : nextLecture ? (
+            <>
+              <div className="next-lecture-time">{dateTime(`2000-01-01T${nextLecture.start_time}:00`)} – {dateTime(`2000-01-01T${nextLecture.end_time}:00`)}</div>
+              <h4 className="next-lecture-subject">{nextLecture.subject}</h4>
+              <div className="next-lecture-details">
+                {nextLecture.course_name && <span><BookOpen size={15} />{nextLecture.course_name}</span>}
+                {nextLecture.department && <span><Building2 size={15} />{nextLecture.department}</span>}
+                {nextLecture.room && <span><MapPin size={15} />Room {nextLecture.room}</span>}
+                <span><CalendarDays size={15} />{formatDay(nextLecture.lecture_date)}</span>
               </div>
-              {scheduleError && <ErrorBanner message={scheduleError} />}
-              {lectureActionError && <ErrorBanner message={lectureActionError} />}
-              {lectureActionMessage && <div className="notice notice-success"><Check size={17} />{lectureActionMessage}</div>}
-              <div className="dashboard-weekday-picker" aria-label="Choose schedule day">
-                {weekdayNames.map((day, index) => (
-                  <button
-                    className={`dashboard-weekday ${selectedDay === index ? 'dashboard-weekday-selected' : ''}`}
-                    key={day}
-                    type="button"
-                    aria-pressed={selectedDay === index}
-                    onClick={() => setSelectedDay(index)}
-                  >
-                    <span>{day.slice(0, 3)}</span>
-                    {index === todayIndex && <small>Today</small>}
-                  </button>
-                ))}
-              </div>
-              {!selectedLectures && !scheduleError ? <Loading /> : selectedLectures?.length ? <div className="dashboard-lecture-list">{selectedLectures.map((lecture) => {
-                const lectureStatus = lecture.status.replaceAll('_', ' ')
-                const statusClass = lecture.status === 'completed'
-                  ? 'lecture-status-completed'
-                  : lecture.status === 'in_progress'
-                    ? 'lecture-status-live'
-                    : lecture.status === 'missed'
-                      ? 'lecture-status-missed'
-                      : ''
-                return (
-                  <article className="dashboard-lecture" key={`${lecture.source_type}-${lecture.schedule_id}`}>
-                    <span className="lecture-timeline-dot" />
-                    <div className="dashboard-lecture-main">
-                      <div className="dashboard-lecture-time">{dateTime(`2000-01-01T${lecture.start_time}:00`)} – {dateTime(`2000-01-01T${lecture.end_time}:00`)}</div>
-                      <strong>{lecture.subject}</strong>
-                      <small>{[lecture.course_name, lecture.department, lecture.room ? `Room: ${lecture.room}` : null].filter(Boolean).join(' · ') || 'Scheduled lecture'}</small>
-                      {(lecture.punch_in_time || lecture.punch_out_time) && <small className="lecture-punch-times">In: {dateTime(lecture.punch_in_time)} · Out: {dateTime(lecture.punch_out_time)}</small>}
-                    </div>
-                    <span className={`lecture-status ${statusClass}`}>{statusLabel(lectureStatus)}</span>
-                    {lecture.can_punch_in && <button className="button button-primary lecture-action-button" disabled={lectureActionBusy} onClick={() => void beginLectureAction(lecture, 'punch_in')}>Punch In</button>}
-                    {lecture.can_punch_out && <button className="button button-secondary lecture-action-button" disabled={lectureActionBusy} onClick={() => void beginLectureAction(lecture, 'punch_out')}>Punch Out</button>}
+              {nextLecture.can_punch_in
+                ? <button className="button button-primary next-lecture-action" disabled={lectureActionBusy} onClick={() => void beginLectureAction(nextLecture, 'punch_in')}>Punch In</button>
+                : nextLecture.can_punch_out
+                  ? <button className="button button-secondary next-lecture-action" disabled={lectureActionBusy} onClick={() => void beginLectureAction(nextLecture, 'punch_out')}>Punch Out</button>
+                  : <div className="next-lecture-window">Check-in opens 15 minutes before the scheduled start and requires live verification.</div>}
+            </>
+          ) : overview ? <div className="next-lecture-empty">No more assigned lectures today.</div> : <Loading />}
+        </section>
+
+        <section className="panel user-schedule-panel">
+          <div className="panel-heading">
+            <div><h3><CalendarDays size={18} /> Today’s Schedule</h3><p className="muted">{formatDay(selectedDate)}</p></div>
+          </div>
+          {scheduleError && <ErrorBanner message={scheduleError} />}
+          {lectureActionError && <ErrorBanner message={lectureActionError} />}
+          {lectureActionMessage && <div className="notice notice-success"><Check size={17} />{lectureActionMessage}</div>}
+          {!selectedLectures && !scheduleError ? <Loading /> : selectedLectures?.length ? <div className="dashboard-lecture-list">{selectedLectures.map((lecture) => {
+            const lectureStatus = lecture.status.replaceAll('_', ' ')
+            const statusClass = lecture.status === 'completed'
+              ? 'lecture-status-completed'
+              : lecture.status === 'in_progress'
+                ? 'lecture-status-live'
+                : lecture.status === 'missed'
+                  ? 'lecture-status-missed'
+                  : ''
+            return (
+              <div className="dashboard-lecture-timeline-item" key={`${lecture.source_type}-${lecture.schedule_id}`}>
+                <span className="lecture-timeline-dot" />
+                <article className="dashboard-lecture">
+                  <div className="dashboard-lecture-main">
+                    <div className="dashboard-lecture-time">{dateTime(`2000-01-01T${lecture.start_time}:00`)} – {dateTime(`2000-01-01T${lecture.end_time}:00`)}</div>
+                    <strong>{lecture.subject}</strong>
+                    <small>{[
+                      lecture.course_name ? `Course: ${lecture.course_name}` : null,
+                      lecture.department ? `Dept: ${lecture.department}` : null,
+                      lecture.room ? `Room: ${lecture.room}` : null,
+                    ].filter(Boolean).join('  |  ') || 'Scheduled lecture'}</small>
+                    {(lecture.punch_in_time || lecture.punch_out_time) && <small className="lecture-punch-times">In: {dateTime(lecture.punch_in_time)} · Out: {dateTime(lecture.punch_out_time)}</small>}
                     {lecture.punch_out_window_closed && <small className="lecture-window-closed">Punch-out window closed</small>}
-                  </article>
-                )
-              })}</div> : selectedLectures && <div className="dashboard-empty"><BookOpen size={22} /><strong>No lectures scheduled for {weekdayNames[selectedDay]}</strong><span>Your college timetable will appear here when it is set up.</span></div>}
-            </section>
-          </div>
-
-          <div className="user-dashboard-grid user-dashboard-secondary">
-            <section className="panel monthly-Dasboard -panel">
-              <div className="panel-heading"><div><h3><Activity size={18} /> Monthly Dasboard </h3><p className="muted">Your attendance this month</p></div></div>
-              <div className="monthly-summary">
-                <div className="monthly-hours-ring"><strong>{data.monthly.hours_worked}</strong><span>hours<br />worked</span></div>
-                <div className="monthly-summary-stats">
-                  <div><span>Completed workdays</span><strong>{data.monthly.completed_days}</strong></div>
-                  <div><span>Scheduled lectures this month</span><strong>{data.monthly.scheduled_lectures}</strong></div>
-                  <div><span>Average hours / workday</span><strong>{data.monthly.completed_days ? (data.monthly.hours_worked / data.monthly.completed_days).toFixed(1) : '0.0'}</strong></div>
-                </div>
-                <div className="monthly-bars" aria-label="Attendance hours over the past six months">
-                  {data.monthly.hours_by_month.map((item) => (
-                    <div className="monthly-bar-column" key={item.month} title={`${item.hours} hours`}>
-                      <span className="monthly-bar-value">{item.hours || ''}</span>
-                      <span className="monthly-bar-track"><span className="monthly-bar-fill" style={{ height: `${Math.max(item.hours ? 8 : 0, (item.hours / maxMonthlyHours) * 100)}%` }} /></span>
-                      <small>{new Date(`${item.month}T12:00:00`).toLocaleDateString(undefined, { month: 'short' })}</small>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </section>
-
-            <section className="panel dashboard-notifications-panel">
-              <div className="panel-heading"><div><h3><Bell size={18} /> Recent Notifications</h3><p className="muted">{data.unread_notifications} unread</p></div></div>
-              {data.recent_notifications.length ? <div className="dashboard-notification-list">{data.recent_notifications.map((notification) => (
-                <article className={`dashboard-notification ${notification.is_read ? '' : 'dashboard-notification-unread'}`} key={notification.id}>
-                  <span className={`notification-type-dot notification-type-${notification.type}`} />
-                  <div><strong>{notification.title}</strong><p>{notification.message}</p><small>{new Date(notification.created_at).toLocaleString()}</small></div>
+                  </div>
+                  <span className={`lecture-status ${statusClass}`}>
+                    {lecture.status === 'completed' && <Check size={12} />}
+                    {lecture.status === 'upcoming' && <Clock3 size={12} />}
+                    {statusLabel(lectureStatus)}
+                  </span>
+                  {lecture.can_punch_in && <button className="button button-primary lecture-action-button" disabled={lectureActionBusy} onClick={() => void beginLectureAction(lecture, 'punch_in')}>Punch In</button>}
+                  {lecture.can_punch_out && <button className="button button-secondary lecture-action-button" disabled={lectureActionBusy} onClick={() => void beginLectureAction(lecture, 'punch_out')}>Punch Out</button>}
                 </article>
-              ))}</div> : <div className="dashboard-empty dashboard-empty-compact"><Bell size={20} /><strong>You’re all caught up</strong><span>New updates will appear here.</span></div>}
-            </section>
-          </div>
-          {lectureChallenge && activeLectureAction && <CaptureDialog
-            instruction={lectureChallenge.instruction}
-            busy={lectureActionBusy}
-            onCancel={() => { setActiveLectureAction(null); setLectureChallenge(null) }}
-            onCapture={(frames) => void submitLectureAction(frames)}
-          />}
-        </>
-      ) : null}
+              </div>
+            )
+          })}</div> : selectedLectures && <div className="dashboard-empty"><BookOpen size={22} /><strong>No lectures scheduled today</strong><span>Your college timetable will appear here when it is set up.</span></div>}
+        </section>
+      </div>
+      {importantNotification && <aside className={`dashboard-notification-popup notification-popup-${importantNotification.type}`} role="alert">
+        <div className="dashboard-notification-popup-heading"><Bell size={16} /><strong>Important notification</strong><button type="button" aria-label="Dismiss notification" disabled={notificationBusy} onClick={() => void dismissNotification(importantNotification.id)}><X size={17} /></button></div>
+        <h3>{importantNotification.title}</h3>
+        <p>{importantNotification.message}</p>
+        {notificationActionError && <span className="notification-popup-error">{notificationActionError}</span>}
+        <div className="dashboard-notification-popup-actions">
+          <button className="button button-link" onClick={() => navigate('notifications')}>View notifications</button>
+          <button className="button button-secondary" disabled={notificationBusy} onClick={() => void dismissNotification(importantNotification.id)}>{notificationBusy ? 'Marking…' : 'Mark as read'}</button>
+        </div>
+      </aside>}
+      {lectureChallenge && activeLectureAction && <CaptureDialog
+        instruction={lectureChallenge.instruction}
+        busy={lectureActionBusy}
+        onCancel={() => { setActiveLectureAction(null); setLectureChallenge(null) }}
+        onCapture={(frames) => void submitLectureAction(frames)}
+      />}
     </div>
   )
 }
@@ -1084,6 +1143,134 @@ type LeaveApplication = {
   created_at: string
 }
 
+function AttendanceTrackerPage({ user }: { user: User }) {
+  const [selectedMonth, setSelectedMonth] = useState(() => new Date().getMonth())
+  const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear())
+  const [showDetails, setShowDetails] = useState(false)
+  const today = localDate()
+  const monthStart = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`
+  const monthEnd = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-${String(new Date(selectedYear, selectedMonth + 1, 0).getDate()).padStart(2, '0')}`
+  const { data, error, loading } = useReloadable(async () => {
+    const [attendanceResponse, leaveResponse, calendarResponse] = await Promise.all([
+      api.get<Attendance[]>('/attendance/mine', { params: { start_date: monthStart, end_date: monthEnd } }),
+      api.get<LeaveApplication[]>('/leave/applications'),
+      api.get<LectureCalendarDay[]>('/lecture-attendance/calendar', { params: { start_date: monthStart, end_date: monthEnd } }),
+    ])
+    return {
+      attendance: attendanceResponse.data,
+      applications: leaveResponse.data,
+      lectureCalendar: calendarResponse.data,
+    }
+  }, `attendance-tracker:${user.id}:${monthStart}`)
+  const attendance = data?.attendance || []
+  const applications = (data?.applications || []).filter(
+    (item) => item.start_date <= monthEnd && item.end_date >= monthStart,
+  )
+  const punchedInDays = attendance.filter((item) => item.punch_in_time).length
+  const approvedLeaves = applications.filter((item) => item.status === 'approved').length
+  const lateArrivals = attendance.filter((item) => item.is_late).length
+  const earlyDepartures = attendance.filter((item) => item.is_early_departure).length
+  const halfDays = attendance.filter((item) => item.status === 'half_day').length
+  const pendingLeaves = applications.filter((item) => item.status === 'pending').length
+  const rejectedLeaves = applications.filter((item) => item.status === 'rejected').length
+  const workedMinutes = attendance.reduce((total, item) => total + item.net_working_minutes, 0)
+  const overtimeMinutes = attendance.reduce((total, item) => total + item.overtime_minutes, 0)
+  const currentMonth = new Date(selectedYear, selectedMonth, 1)
+  const daysInMonth = new Date(selectedYear, selectedMonth + 1, 0).getDate()
+  const calendarDays: Array<number | null> = [
+    ...Array.from({ length: currentMonth.getDay() }, () => null),
+    ...Array.from({ length: daysInMonth }, (_, index) => index + 1),
+  ]
+  const lectureCalendarByDate = new Map((data?.lectureCalendar || []).map((item) => [item.date, item]))
+  const yearOptions = Array.from({ length: 7 }, (_, index) => new Date().getFullYear() - 5 + index)
+
+  function displayCount(value: number) {
+    return data ? value : '—'
+  }
+
+  return (
+    <div className="page-content attendance-tracker-page">
+      <PageHeading eyebrow="PERSONAL ATTENDANCE" title="Attendance tracker" description="Review your workday attendance, leave requests, and monthly activity." />
+      {error && <ErrorBanner message={error} />}
+      <div className="attendance-tracker-filters">
+        <label>Month<select value={selectedMonth} onChange={(event) => setSelectedMonth(Number(event.target.value))}>
+          {Array.from({ length: 12 }, (_, month) => <option key={month} value={month}>{new Date(2000, month, 1).toLocaleString(undefined, { month: 'long' })}</option>)}
+        </select></label>
+        <label>Year<select value={selectedYear} onChange={(event) => setSelectedYear(Number(event.target.value))}>
+          {yearOptions.map((year) => <option key={year} value={year}>{year}</option>)}
+        </select></label>
+      </div>
+
+      <div className="attendance-tracker-dashboard-grid">
+        <div className="attendance-tracker-main-column">
+      <section className="panel attendance-tracker-summary">
+        <div className="attendance-total-time">
+          <span>Total working time</span>
+          <strong>{data ? duration(workedMinutes) : '—'}</strong>
+          <small>{new Date(selectedYear, selectedMonth, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })}</small>
+        </div>
+        <div className="attendance-tracker-kpis">
+          <article><span className="tracker-kpi-icon tracker-icon-blue"><CalendarDays size={18} /></span><strong>{displayCount(punchedInDays)}</strong><small>Punched-in days</small></article>
+          <article><span className="tracker-kpi-icon tracker-icon-green"><Check size={18} /></span><strong>{displayCount(approvedLeaves)}</strong><small>Approved leave requests</small></article>
+          <article><span className="tracker-kpi-icon tracker-icon-orange"><Clock3 size={18} /></span><strong>{displayCount(lateArrivals)}</strong><small>Late arrivals</small></article>
+          <article><span className="tracker-kpi-icon tracker-icon-gray"><LogOut size={18} /></span><strong>{displayCount(earlyDepartures)}</strong><small>Early departures</small></article>
+        </div>
+        <button className="button button-secondary attendance-tracker-details-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails((shown) => !shown)}>
+          {showDetails ? 'Hide Details' : 'View Details'}
+        </button>
+      </section>
+
+      <div className="attendance-tracker-metrics">
+        <article className="tracker-metric-card tracker-metric-purple"><strong>{displayCount(halfDays)}</strong><span>Half days</span><Clock3 size={21} /></article>
+        <article className="tracker-metric-card tracker-metric-blue"><strong>{data ? duration(overtimeMinutes) : '—'}</strong><span>Extra working hours</span><Activity size={21} /></article>
+        <article className="tracker-metric-card tracker-metric-orange"><strong>{displayCount(pendingLeaves)}</strong><span>Pending leave requests</span><CalendarDays size={21} /></article>
+        <article className="tracker-metric-card tracker-metric-red"><strong>{displayCount(rejectedLeaves)}</strong><span>Rejected leave requests</span><X size={21} /></article>
+      </div>
+
+      {showDetails && <section className="panel attendance-tracker-details">
+        <div className="panel-heading"><div><h3>Attendance details</h3><p className="muted">{attendance.length} attendance record{attendance.length === 1 ? '' : 's'} this month</p></div></div>
+        {attendance.length ? <div className="table-scroll"><table><thead><tr><th>Date</th><th>Status</th><th>Punch in</th><th>Punch out</th><th>Net worked</th><th>Notes</th></tr></thead><tbody>
+          {[...attendance].sort((left, right) => right.date.localeCompare(left.date)).map((item) => <tr key={item.id}>
+            <td>{formatDay(item.date)}</td><td><StatusBadge status={item.status} /></td><td>{dateTime(item.punch_in_time)}</td><td>{dateTime(item.punch_out_time)}</td><td>{duration(item.net_working_minutes)}</td>
+            <td>{[item.is_late ? `Late by ${item.late_by_minutes} min` : '', item.is_early_departure ? 'Early departure' : ''].filter(Boolean).join(' · ') || '—'}</td>
+          </tr>)}
+        </tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No attendance records for this month</strong><span>Your workday punches will appear here.</span></div>}
+      </section>}
+
+        </div>
+      <section className="panel attendance-tracker-calendar-panel">
+        <div className="attendance-calendar-heading"><h3>{currentMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h3></div>
+        {loading && !data ? <Loading /> : <div className="attendance-calendar-grid" role="grid" aria-label="Monthly attendance calendar">
+          {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((day) => <span className="attendance-calendar-weekday" role="columnheader" key={day}>{day}</span>)}
+          {calendarDays.map((day, index) => {
+            if (day === null) return <span className="attendance-calendar-empty" role="gridcell" key={`empty-${index}`} />
+            const dateKey = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+            const lectureDay = lectureCalendarByDate.get(dateKey)
+            const isToday = dateKey === today
+            const classes = [
+              'attendance-calendar-day',
+              `attendance-calendar-${lectureDay?.status || 'no_lecture'}`,
+              isToday ? 'attendance-calendar-today' : '',
+            ].filter(Boolean).join(' ')
+            const statusText = !lectureDay || lectureDay.status === 'no_lecture'
+              ? 'No lecture scheduled'
+              : `${lectureDay.attended_lectures} of ${lectureDay.scheduled_lectures} lectures attended${lectureDay.missed_lectures ? `, ${lectureDay.missed_lectures} missed` : ''}`
+            return <span className={classes} role="gridcell" aria-label={`${dateKey}${statusText ? `, ${statusText}` : ''}`} title={statusText || dateKey} key={dateKey}>{day}</span>
+          })}
+        </div>}
+        <div className="attendance-calendar-legend">
+          <span><i className="legend-attended" />Lectures attended</span>
+          <span><i className="legend-missed" />Missed lecture</span>
+          <span><i className="legend-scheduled" />Scheduled</span>
+          <span><i className="legend-no-lecture" />No lecture</span>
+          <span><i className="legend-today" />Today</span>
+        </div>
+      </section>
+      </div>
+    </div>
+  )
+}
+
 function LeavePage({ user }: { user: User }) {
   const [typeId, setTypeId] = useState('')
   const [startDate, setStartDate] = useState('')
@@ -1317,7 +1504,7 @@ function AttendanceNote() {
 function PeoplePage() {
   const [pageError, setPageError] = useState('')
   const [pageMessage, setPageMessage] = useState('')
-  const [employee, setEmployee] = useState({ employee_id: '', full_name: '', email: '', phone: '', password: '', department_id: '', role: 'faculty', shift_id: '' })
+  const [employee, setEmployee] = useState({ employee_id: '', full_name: '', email: '', username: '', phone: '', password: '', department_id: '', role: 'faculty', shift_id: '' })
   const [shift, setShift] = useState({ name: '', start_time: '09:00', end_time: '17:00', grace_period_minutes: '15', half_day_minutes: '240', full_day_minutes: '360', max_break_minutes: '60', is_overnight: false })
   const [newDepartment, setNewDepartment] = useState({ name: '', code: '' })
   const [busy, setBusy] = useState(false)
@@ -1362,10 +1549,11 @@ function PeoplePage() {
   async function createEmployee(event: FormEvent) {
     const created = await submitForm(event, '/admin/users', {
       ...employee,
+      username: employee.role === 'hod' ? employee.username : null,
       department_id: employee.department_id ? Number(employee.department_id) : null,
       shift_id: employee.shift_id ? Number(employee.shift_id) : null,
     }, 'Employee account created.')
-    if (created) setEmployee({ employee_id: '', full_name: '', email: '', phone: '', password: '', department_id: '', role: 'faculty', shift_id: '' })
+    if (created) setEmployee({ employee_id: '', full_name: '', email: '', username: '', phone: '', password: '', department_id: '', role: 'faculty', shift_id: '' })
   }
 
   async function assignShift(userId: number, shiftId: string) {
@@ -1386,11 +1574,11 @@ function PeoplePage() {
       {error && <ErrorBanner message={error} />}{message && <div className="notice notice-success"><Check size={17} />{message}</div>}
       <div className="two-column">
         <AttendanceNote />
-        <section className="panel"><div className="panel-heading"><div><h3>Create faculty or staff account</h3><p className="muted">Share the initial password with the new account holder securely.</p></div><Users size={18} className="panel-icon" /></div><form onSubmit={(event) => void createEmployee(event)} className="form-stack"><label>Employee ID<input value={employee.employee_id} onChange={(event) => setEmployee({ ...employee, employee_id: event.target.value })} required /></label><label>Full name<input value={employee.full_name} onChange={(event) => setEmployee({ ...employee, full_name: event.target.value })} required /></label><label>College email<input type="email" value={employee.email} onChange={(event) => setEmployee({ ...employee, email: event.target.value })} required /></label><label>Phone number<input type="tel" value={employee.phone} onChange={(event) => setEmployee({ ...employee, phone: event.target.value })} /></label><label>Initial password<input type="password" autoComplete="new-password" minLength={12} value={employee.password} onChange={(event) => setEmployee({ ...employee, password: event.target.value })} required /><span className="table-subtext">Use at least 12 characters.</span></label><div className="form-grid"><label>Department<select value={employee.department_id} onChange={(event) => setEmployee({ ...employee, department_id: event.target.value })}><option value="">No department</option>{departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Role<select value={employee.role} onChange={(event) => setEmployee({ ...employee, role: event.target.value })}><option value="faculty">Visiting faculty</option><option value="staff">Staff</option><option value="hod">HOD</option></select></label></div><label>Working shift<select value={employee.shift_id} onChange={(event) => setEmployee({ ...employee, shift_id: event.target.value })}><option value="">Assign later</option>{shifts.filter((item) => item.is_active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.start_time}–{item.end_time}</option>)}</select></label><button className="button button-primary" disabled={busy}>Create account <ChevronRight size={15} /></button></form></section>
+        <section className="panel"><div className="panel-heading"><div><h3>Create faculty or staff account</h3><p className="muted">Share the initial password with the new account holder securely.</p></div><Users size={18} className="panel-icon" /></div><form onSubmit={(event) => void createEmployee(event)} className="form-stack"><label>Employee ID<input value={employee.employee_id} onChange={(event) => setEmployee({ ...employee, employee_id: event.target.value })} required /></label><label>Full name<input value={employee.full_name} onChange={(event) => setEmployee({ ...employee, full_name: event.target.value })} required /></label><label>College email<input type="email" value={employee.email} onChange={(event) => setEmployee({ ...employee, email: event.target.value })} required /></label><label>Phone number<input type="tel" value={employee.phone} onChange={(event) => setEmployee({ ...employee, phone: event.target.value })} /></label><label>Initial password<input type="password" autoComplete="new-password" minLength={12} value={employee.password} onChange={(event) => setEmployee({ ...employee, password: event.target.value })} required /><span className="table-subtext">Use at least 12 characters.</span></label><div className="form-grid"><label>Department<select value={employee.department_id} onChange={(event) => setEmployee({ ...employee, department_id: event.target.value })}><option value="">No department</option>{departments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Role<select value={employee.role} onChange={(event) => setEmployee({ ...employee, role: event.target.value, username: event.target.value === 'hod' ? employee.username : '' })}><option value="faculty">Visiting faculty</option><option value="staff">Staff</option><option value="hod">HOD</option></select></label></div>{employee.role === 'hod' && <label>Admin username<input value={employee.username} onChange={(event) => setEmployee({ ...employee, username: event.target.value.toLowerCase() })} required minLength={3} maxLength={150} pattern="[A-Za-z0-9._-]+" autoComplete="username" /><span className="table-subtext">Must be unique across all colleges; the HOD signs in with this and the initial password.</span></label>}<label>Working shift<select value={employee.shift_id} onChange={(event) => setEmployee({ ...employee, shift_id: event.target.value })}><option value="">Assign later</option>{shifts.filter((item) => item.is_active).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.start_time}–{item.end_time}</option>)}</select></label><button className="button button-primary" disabled={busy}>Create account <ChevronRight size={15} /></button></form></section>
         <section className="panel"><div className="panel-heading"><div><h3>Departments</h3><p className="muted">Organize employees for HOD access.</p></div><Building2 size={18} className="panel-icon" /></div><form className="form-grid compact-grid" onSubmit={(event) => void submitForm(event, '/admin/departments', newDepartment, 'Department created.')}><label>Name<input value={newDepartment.name} onChange={(event) => setNewDepartment({ ...newDepartment, name: event.target.value })} required /></label><label>Code<input value={newDepartment.code} onChange={(event) => setNewDepartment({ ...newDepartment, code: event.target.value })} /></label><div className="full-field"><button className="button button-secondary" disabled={busy}>Add department</button></div></form><div className="mini-list">{departments.map((item) => <span key={item.id}>{item.name}<small>{item.code || '—'}</small></span>)}</div></section>
         <section className="panel"><div className="panel-heading"><div><h3>Working shifts</h3><p className="muted">Set work hours and assign employees.</p></div><Clock3 size={18} className="panel-icon" /></div><form className="form-grid compact-grid" onSubmit={(event) => void submitForm(event, '/admin/shifts', { ...shift, grace_period_minutes: Number(shift.grace_period_minutes), half_day_minutes: Number(shift.half_day_minutes), full_day_minutes: Number(shift.full_day_minutes), max_break_minutes: Number(shift.max_break_minutes) }, 'Working shift created.')}><label>Shift name<input value={shift.name} onChange={(event) => setShift({ ...shift, name: event.target.value })} required /></label><label>Start time<input type="time" value={shift.start_time} onChange={(event) => setShift({ ...shift, start_time: event.target.value })} required /></label><label>End time<input type="time" value={shift.end_time} onChange={(event) => setShift({ ...shift, end_time: event.target.value })} required /></label><label>Grace minutes<input type="number" min="0" max="240" value={shift.grace_period_minutes} onChange={(event) => setShift({ ...shift, grace_period_minutes: event.target.value })} /></label><label>Half day (min)<input type="number" min="1" value={shift.half_day_minutes} onChange={(event) => setShift({ ...shift, half_day_minutes: event.target.value })} /></label><label>Full day (min)<input type="number" min="1" value={shift.full_day_minutes} onChange={(event) => setShift({ ...shift, full_day_minutes: event.target.value })} /></label><label className="check-inline"><input type="checkbox" checked={shift.is_overnight} onChange={(event) => setShift({ ...shift, is_overnight: event.target.checked })} /> Overnight</label><div className="full-field"><button className="button button-secondary" disabled={busy}>Add shift</button></div></form></section>
       </div>
-      <section className="panel"><div className="panel-heading"><div><h3>Employee directory</h3><p className="muted">{users.length} accounts in this college</p></div></div><div className="table-scroll"><table><thead><tr><th>Employee</th><th>Department</th><th>Role</th><th>Shift assignment</th></tr></thead><tbody>{users.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong><span className="table-subtext">{item.employee_id} · {item.email}</span></td><td>{departments.find((department) => department.id === item.department_id)?.name || '—'}</td><td>{item.role === 'faculty' ? 'Visiting faculty' : statusLabel(item.role)}</td><td><select className="table-select" aria-label={`Shift for ${item.full_name}`} value={item.shift_id || ''} onChange={(event) => void assignShift(item.id, event.target.value)}><option value="">No shift</option>{shifts.filter((entry) => entry.is_active).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></td></tr>)}</tbody></table></div></section>
+      <section className="panel"><div className="panel-heading"><div><h3>Employee directory</h3><p className="muted">{users.length} accounts in this college</p></div></div><div className="table-scroll"><table><thead><tr><th>Employee</th><th>Department</th><th>Role</th><th>Shift assignment</th></tr></thead><tbody>{users.map((item) => <tr key={item.id}><td><strong>{item.full_name}</strong><span className="table-subtext">{item.employee_id} · {item.email}{item.username ? ` · Admin username: ${item.username}` : ''}</span></td><td>{departments.find((department) => department.id === item.department_id)?.name || '—'}</td><td>{item.role === 'faculty' ? 'Visiting faculty' : statusLabel(item.role)}</td><td><select className="table-select" aria-label={`Shift for ${item.full_name}`} value={item.shift_id || ''} onChange={(event) => void assignShift(item.id, event.target.value)}><option value="">No shift</option>{shifts.filter((entry) => entry.is_active).map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></td></tr>)}</tbody></table></div></section>
     </div>
   )
 }
@@ -1959,6 +2147,7 @@ function App() {
         {page === 'Dasboard ' && (isManager(user.role) ? <Dasboard  user={user} navigate={selectPage} /> : <UserDashboard user={user} navigate={selectPage} />)}
         {page === 'timetable' && <TimetablePage user={user} />}
         {page === 'attendance' && <AttendancePage />}
+        {page === 'attendance_tracker' && <AttendanceTrackerPage user={user} />}
         {page === 'additional_lectures' && <AdditionalLecturesPage user={user} />}
         {page === 'tasks' && <TasksPage user={user} selectedProjectId={selectedProjectId} />}
         {page === 'projects' && <ProjectsPage user={user} navigate={selectPage} />}

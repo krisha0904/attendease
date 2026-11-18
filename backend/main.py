@@ -57,6 +57,12 @@ class PasswordLogin(BaseModel):
     device_info: str | None = Field(default=None, max_length=500)
 
 
+class AdminUsernameLogin(BaseModel):
+    username: str = Field(min_length=3, max_length=150, pattern=r"^[A-Za-z0-9._-]+$")
+    password: str = Field(min_length=1, max_length=128)
+    device_info: str | None = Field(default=None, max_length=500)
+
+
 class RegistrationRequest(BaseModel):
     college_id: int = Field(gt=0)
     college_code: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_-]+$")
@@ -92,12 +98,23 @@ class EmployeeCreate(BaseModel):
     employee_id: str = Field(min_length=1, max_length=50)
     full_name: str = Field(min_length=1, max_length=255)
     email: EmailStr
+    username: str | None = Field(default=None, min_length=3, max_length=150, pattern=r"^[A-Za-z0-9._-]+$")
     phone: str | None = Field(default=None, max_length=20)
     password: str = Field(min_length=12, max_length=128)
     department_id: int | None = None
     shift_id: int | None = None
     designation: str | None = Field(default=None, max_length=100)
     role: models.UserRole = models.UserRole.FACULTY
+
+    @model_validator(mode="after")
+    def require_username_for_admin(self):
+        if self.role == models.UserRole.HOD and not self.username:
+            raise ValueError("An admin username is required for HOD accounts.")
+        if self.role != models.UserRole.HOD and self.username:
+            raise ValueError("Only HOD admin accounts can have a username.")
+        if self.username:
+            self.username = self.username.strip().lower()
+        return self
 
 
 class ProjectCreate(BaseModel):
@@ -301,6 +318,7 @@ class UserSummary(BaseModel):
     employee_id: str
     full_name: str
     email: str
+    username: str | None
     college_id: int
     department_id: int | None
     shift_id: int | None
@@ -378,6 +396,7 @@ def _user_payload(user: models.User) -> dict:
         "employee_id": user.employee_id,
         "full_name": user.full_name,
         "email": user.email,
+        "username": user.username,
         "college_id": user.college_id,
         "department_id": user.department_id,
         "shift_id": user.shift_id,
@@ -476,7 +495,7 @@ def require_roles(*roles: models.UserRole) -> Callable:
 
 
 def _attendance_now() -> datetime:
-    zone_name = os.getenv("ATTENDANCE_TIMEZONE", "UTC")
+    zone_name = os.getenv("ATTENDANCE_TIMEZONE", "Asia/Kolkata")
     try:
         return datetime.now(ZoneInfo(zone_name)).replace(tzinfo=None)
     except ZoneInfoNotFoundError as exc:
@@ -748,6 +767,8 @@ def _attendance_payload(record: models.AttendanceRecord) -> dict:
         "net_working_minutes": record.net_working_minutes or 0,
         "is_late": bool(record.is_late),
         "late_by_minutes": record.late_by_minutes or 0,
+        "is_early_departure": bool(record.is_early_departure),
+        "overtime_minutes": record.overtime_minutes or 0,
         "active_break_started_at": active_break.break_start if active_break else None,
     }
 
@@ -803,6 +824,201 @@ def _lecture_attendance_payload(record: models.LectureAttendanceRecord) -> dict:
         "punch_in_face_verified": bool(record.punch_in_face_verified),
         "punch_out_face_verified": bool(record.punch_out_face_verified),
     }
+
+
+def _lecture_occurrence_payload(
+    lecture_date: date,
+    now: datetime,
+    source_type: str,
+    schedule_id: int,
+    subject: str,
+    course_name: str | None,
+    department: str | None,
+    room: str | None,
+    start_time: time_type,
+    end_time: time_type,
+    record: models.LectureAttendanceRecord | None,
+) -> dict:
+    starts_at = datetime.combine(lecture_date, start_time)
+    ends_at = datetime.combine(lecture_date, end_time)
+    is_today = lecture_date == now.date()
+    elapsed_end = min(ends_at, now) if lecture_date <= now.date() else starts_at
+    scheduled_minutes = _working_minutes(starts_at, ends_at)
+    elapsed_scheduled_minutes = _working_minutes(starts_at, max(starts_at, elapsed_end))
+    actual_start = max(starts_at, record.punch_in_time) if record and record.punch_in_time else None
+    actual_end = (
+        min(elapsed_end, record.punch_out_time or now)
+        if actual_start is not None
+        else None
+    )
+    worked_minutes = (
+        _working_minutes(actual_start, actual_end)
+        if actual_start is not None and actual_end is not None and actual_end > actual_start
+        else 0
+    )
+    can_punch_in = bool(
+        is_today
+        and (record is None or record.punch_in_time is None)
+        and starts_at - timedelta(minutes=15) <= now <= ends_at
+    )
+    can_punch_out = bool(
+        is_today
+        and record is not None
+        and record.punch_in_time is not None
+        and record.punch_out_time is None
+        and record.punch_in_time <= now <= ends_at + timedelta(minutes=15)
+    )
+    if record and record.punch_out_time:
+        attendance_status = "completed"
+    elif record and record.punch_in_time:
+        attendance_status = "in_progress"
+    elif starts_at > now:
+        attendance_status = "upcoming"
+    elif now > ends_at:
+        attendance_status = "missed"
+    else:
+        attendance_status = "scheduled"
+    return {
+        "source_type": source_type,
+        "schedule_id": schedule_id,
+        "lecture_date": lecture_date,
+        "subject": subject,
+        "course_name": course_name,
+        "department": department,
+        "room": room,
+        "start_time": start_time.strftime("%H:%M"),
+        "end_time": end_time.strftime("%H:%M"),
+        "status": attendance_status,
+        "punch_in_time": record.punch_in_time if record else None,
+        "punch_out_time": record.punch_out_time if record else None,
+        "scheduled_minutes": scheduled_minutes,
+        "worked_minutes": worked_minutes,
+        "not_worked_minutes": max(0, elapsed_scheduled_minutes - worked_minutes),
+        "can_punch_in": can_punch_in,
+        "can_punch_out": can_punch_out,
+        "punch_out_window_closed": bool(
+            record
+            and record.punch_in_time
+            and record.punch_out_time is None
+            and (
+                lecture_date < now.date()
+                or is_today and now > ends_at + timedelta(minutes=15)
+            )
+        ),
+    }
+
+
+def _lecture_calendar_payload(
+    db: Session,
+    user: models.User,
+    start_date: date,
+    end_date: date,
+    now: datetime,
+) -> list[dict]:
+    weekly_lectures = (
+        db.query(models.WeeklyLecture)
+        .filter(
+            models.WeeklyLecture.user_id == user.id,
+            models.WeeklyLecture.college_id == user.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        )
+        .all()
+    )
+    additional_lectures = (
+        db.query(models.AdditionalLectureRequest)
+        .filter(
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.lecture_date >= start_date,
+            models.AdditionalLectureRequest.lecture_date <= end_date,
+            models.AdditionalLectureRequest.status == "approved",
+        )
+        .all()
+    )
+    records = (
+        db.query(models.LectureAttendanceRecord)
+        .filter(
+            models.LectureAttendanceRecord.user_id == user.id,
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.lecture_date >= start_date,
+            models.LectureAttendanceRecord.lecture_date <= end_date,
+        )
+        .all()
+    )
+    weekly_records = {
+        (item.lecture_date, item.weekly_lecture_id): item
+        for item in records
+        if item.weekly_lecture_id is not None
+    }
+    additional_records = {
+        (item.lecture_date, item.additional_lecture_request_id): item
+        for item in records
+        if item.additional_lecture_request_id is not None
+    }
+    weekly_by_day = {
+        weekday: [lecture for lecture in weekly_lectures if lecture.day_of_week == weekday]
+        for weekday in range(7)
+    }
+    additional_by_date: dict[date, list[models.AdditionalLectureRequest]] = {}
+    for lecture in additional_lectures:
+        additional_by_date.setdefault(lecture.lecture_date, []).append(lecture)
+
+    calendar = []
+    current_date = start_date
+    while current_date <= end_date:
+        occurrences = [
+            _lecture_occurrence_payload(
+                current_date,
+                now,
+                "weekly",
+                lecture.id,
+                lecture.subject,
+                lecture.course_name,
+                lecture.department.name if lecture.department else None,
+                lecture.room,
+                lecture.start_time,
+                lecture.end_time,
+                weekly_records.get((current_date, lecture.id)),
+            )
+            for lecture in weekly_by_day[current_date.weekday()]
+        ]
+        occurrences.extend(
+            _lecture_occurrence_payload(
+                current_date,
+                now,
+                "additional",
+                lecture.id,
+                lecture.subject,
+                None,
+                user.department.name if user.department else None,
+                lecture.room,
+                lecture.start_time,
+                lecture.end_time,
+                additional_records.get((current_date, lecture.id)),
+            )
+            for lecture in additional_by_date.get(current_date, [])
+        )
+        occurrences.sort(key=lambda item: item["start_time"])
+        attended_count = sum(bool(item["punch_in_time"]) for item in occurrences)
+        missed_count = sum(item["status"] == "missed" for item in occurrences)
+        if not occurrences:
+            day_status = "no_lecture"
+        elif missed_count:
+            day_status = "missed"
+        elif attended_count == len(occurrences):
+            day_status = "attended"
+        else:
+            day_status = "scheduled"
+        calendar.append({
+            "date": current_date,
+            "status": day_status,
+            "scheduled_lectures": len(occurrences),
+            "attended_lectures": attended_count,
+            "missed_lectures": missed_count,
+            "lectures": occurrences,
+        })
+        current_date += timedelta(days=1)
+    return calendar
 
 
 def _count_leave_days(
@@ -1151,6 +1367,7 @@ def create_app() -> FastAPI:
                 func.lower(models.User.email) == email,
                 models.User.is_active.is_(True),
                 models.College.is_active.is_(True),
+                models.User.role.in_((models.UserRole.FACULTY, models.UserRole.STAFF)),
             )
             .first()
         )
@@ -1188,6 +1405,78 @@ def create_app() -> FastAPI:
                 detail="Email or password is incorrect.",
             )
 
+        return _issue_session(user, request, db, payload.device_info)
+
+    @app.post("/auth/admin-login")
+    def admin_username_login(
+        payload: AdminUsernameLogin,
+        request: Request,
+        db: Session = Depends(get_db),
+    ):
+        now = _utcnow()
+        ip_address = request.client.host if request.client else None
+        if ip_address:
+            recent_ip_failures = (
+                db.query(models.SecurityEvent.id)
+                .filter(
+                    models.SecurityEvent.event_type == "auth.password.failed",
+                    models.SecurityEvent.ip_address == ip_address,
+                    models.SecurityEvent.created_at >= now - timedelta(minutes=15),
+                )
+                .limit(20)
+                .count()
+            )
+            if recent_ip_failures >= 20:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many sign-in attempts. Wait 15 minutes before trying again.",
+                )
+
+        username = payload.username.strip().lower()
+        user = (
+            db.query(models.User)
+            .join(models.College, models.College.id == models.User.college_id)
+            .filter(
+                func.lower(models.User.username) == username,
+                models.User.role.in_((models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+                models.User.is_active.is_(True),
+                models.College.is_active.is_(True),
+            )
+            .first()
+        )
+        recent_user_failures = 0
+        if user is not None:
+            recent_user_failures = (
+                db.query(models.SecurityEvent.id)
+                .filter(
+                    models.SecurityEvent.event_type == "auth.password.failed",
+                    models.SecurityEvent.user_id == user.id,
+                    models.SecurityEvent.created_at >= now - timedelta(minutes=15),
+                )
+                .limit(5)
+                .count()
+            )
+
+        password_matches = verify_password(
+            payload.password,
+            user.password_hash if user is not None and recent_user_failures < 5 else None,
+        )
+        if user is None or recent_user_failures >= 5 or not password_matches:
+            db.add(
+                models.SecurityEvent(
+                    college_id=user.college_id if user is not None else None,
+                    user_id=user.id if user is not None else None,
+                    event_type="auth.password.failed",
+                    severity="medium",
+                    description="Admin username/password sign-in failed.",
+                    ip_address=ip_address,
+                )
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Username or password is incorrect.",
+            )
         return _issue_session(user, request, db, payload.device_info)
 
     @app.post("/auth/password/change")
@@ -1232,7 +1521,7 @@ def create_app() -> FastAPI:
             .filter(func.lower(models.User.email) == email, models.User.is_active.is_(True))
             .first()
         )
-        if user is None:
+        if user is None or user.role in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
             return {"message": "If an active account exists, a sign-in code has been sent."}
 
         policy = (
@@ -1290,6 +1579,11 @@ def create_app() -> FastAPI:
         )
         if user is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
+        if user.role in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Admin accounts must use username and password sign-in.",
+            )
 
         policy = (
             db.query(models.AttendancePolicy)
@@ -1742,6 +2036,9 @@ def create_app() -> FastAPI:
         if payload.role == models.UserRole.SUPER_ADMIN:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Use the platform bootstrap process to add a super administrator.")
         email = str(payload.email).strip().lower()
+        username = payload.username.strip().lower() if payload.username else None
+        if username and db.query(models.User.id).filter(func.lower(models.User.username) == username).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That admin username is already in use.")
         duplicate = (
             db.query(models.User.id)
             .filter(
@@ -1795,6 +2092,7 @@ def create_app() -> FastAPI:
             employee_id=employee_id,
             full_name=payload.full_name.strip(),
             email=email,
+            username=username,
             phone=payload.phone.strip() if payload.phone else None,
             password_hash=hash_password(payload.password),
             designation=payload.designation,
@@ -2875,70 +3173,10 @@ def create_app() -> FastAPI:
         }
         now = _attendance_now()
 
-        def occurrence_payload(
-            source_type: str,
-            schedule_id: int,
-            subject: str,
-            course_name: str | None,
-            department: str | None,
-            room: str | None,
-            start_time: time_type,
-            end_time: time_type,
-            record: models.LectureAttendanceRecord | None,
-        ) -> dict:
-            starts_at = datetime.combine(lecture_date, start_time)
-            ends_at = datetime.combine(lecture_date, end_time)
-            is_today = lecture_date == now.date()
-            can_punch_in = bool(
-                is_today
-                and (record is None or record.punch_in_time is None)
-                and starts_at - timedelta(minutes=15) <= now <= ends_at
-            )
-            can_punch_out = bool(
-                is_today
-                and record is not None
-                and record.punch_in_time is not None
-                and record.punch_out_time is None
-                and record.punch_in_time <= now <= ends_at + timedelta(minutes=15)
-            )
-            if record and record.punch_out_time:
-                attendance_status = "completed"
-            elif record and record.punch_in_time:
-                attendance_status = "in_progress"
-            elif starts_at > now:
-                attendance_status = "upcoming"
-            elif now > ends_at:
-                attendance_status = "missed"
-            else:
-                attendance_status = "scheduled"
-            return {
-                "source_type": source_type,
-                "schedule_id": schedule_id,
-                "lecture_date": lecture_date,
-                "subject": subject,
-                "course_name": course_name,
-                "department": department,
-                "room": room,
-                "start_time": start_time.strftime("%H:%M"),
-                "end_time": end_time.strftime("%H:%M"),
-                "status": attendance_status,
-                "punch_in_time": record.punch_in_time if record else None,
-                "punch_out_time": record.punch_out_time if record else None,
-                "can_punch_in": can_punch_in,
-                "can_punch_out": can_punch_out,
-                "punch_out_window_closed": bool(
-                    record
-                    and record.punch_in_time
-                    and record.punch_out_time is None
-                    and (
-                        lecture_date < now.date()
-                        or is_today and now > ends_at + timedelta(minutes=15)
-                    )
-                ),
-            }
-
         occurrences = [
-            occurrence_payload(
+            _lecture_occurrence_payload(
+                lecture_date,
+                now,
                 "weekly",
                 lecture.id,
                 lecture.subject,
@@ -2952,7 +3190,9 @@ def create_app() -> FastAPI:
             for lecture in weekly_lectures
         ]
         occurrences.extend(
-            occurrence_payload(
+            _lecture_occurrence_payload(
+                lecture_date,
+                now,
                 "additional",
                 lecture.id,
                 lecture.subject,
@@ -2966,6 +3206,80 @@ def create_app() -> FastAPI:
             for lecture in additional_lectures
         )
         return sorted(occurrences, key=lambda item: item["start_time"])
+
+    @app.get("/lecture-attendance/calendar")
+    def lecture_attendance_calendar(
+        start_date: date,
+        end_date: date,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.FACULTY, models.UserRole.STAFF):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only faculty and staff have lecture attendance.")
+        if end_date < start_date or (end_date - start_date).days > 366:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid lecture calendar date range.")
+
+        calendar = _lecture_calendar_payload(db, user, start_date, end_date, _attendance_now())
+        return [
+            {
+                "date": day["date"],
+                "status": day["status"],
+                "scheduled_lectures": day["scheduled_lectures"],
+                "attended_lectures": day["attended_lectures"],
+                "missed_lectures": day["missed_lectures"],
+            }
+            for day in calendar
+        ]
+
+    @app.get("/lecture-attendance/overview")
+    def lecture_attendance_overview(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        if user.role not in (models.UserRole.FACULTY, models.UserRole.STAFF):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only faculty and staff have lecture attendance.")
+
+        now = _attendance_now()
+        today = now.date()
+        week_start = today - timedelta(days=today.weekday())
+        week_dates = [week_start + timedelta(days=offset) for offset in range(7)]
+        lectures_by_date = {
+            day["date"]: day["lectures"]
+            for day in _lecture_calendar_payload(db, user, week_start, week_dates[-1], now)
+        }
+        today_lectures = lectures_by_date[today]
+        all_week_lectures = [
+            lecture
+            for lectures in lectures_by_date.values()
+            for lecture in lectures
+        ]
+        upcoming_today = [
+            lecture
+            for lecture in today_lectures
+            if lecture["status"] == "upcoming"
+        ]
+        next_candidates = [
+            lecture
+            for lecture in today_lectures
+            if lecture["status"] in ("upcoming", "scheduled", "in_progress")
+            and time_type.fromisoformat(lecture["end_time"]) > now.time()
+        ]
+        next_lecture = min(next_candidates, key=lambda item: item["start_time"]) if next_candidates else None
+        return {
+            "today": {
+                "date": today,
+                "assigned_lectures": len(today_lectures),
+                "attended_lectures": sum(lecture["status"] == "completed" for lecture in today_lectures),
+                "upcoming_lectures": len(upcoming_today),
+                "lectures": today_lectures,
+            },
+            "week": {
+                "scheduled_minutes": sum(lecture["scheduled_minutes"] for lecture in all_week_lectures),
+                "worked_minutes": sum(lecture["worked_minutes"] for lecture in all_week_lectures),
+                "not_worked_minutes": sum(lecture["not_worked_minutes"] for lecture in all_week_lectures),
+            },
+            "next_lecture": next_lecture,
+        }
 
     @app.post("/lecture-attendance/{action}")
     def perform_lecture_attendance_action(

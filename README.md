@@ -8,7 +8,8 @@ AttendEase is a college attendance web app for visiting faculty and staff. It us
 - Face enrollment with local passive liveness checking and administrator approval.
 - Daily check-in, break start/end, and check-out; punch-in and punch-out require approved face enrollment and live face verification.
 - Separate lecture punch-in/out for recurring timetable entries and approved additional lectures, with live face verification.
-- A user dashboard with current attendance, weekly timetable, monthly attendance hours, and recent notifications; payments are intentionally not shown.
+- A focused user dashboard with four daily lecture summary cards, weekly teaching-hour totals, a next-lecture card, today's schedule and per-lecture punch controls, and important notification pop-ups.
+- A personal monthly attendance tracker with workday totals, recorded late/early/half-day/overtime details, leave request status, and a lecture-aware calendar that distinguishes attended, missed, upcoming, and unscheduled days.
 - Admin-managed weekly timetables and faculty/staff additional-lecture requests with department-scoped approval.
 - Visiting faculty and staff accounts, departments, and working shifts.
 - A searchable college faculty directory with email and phone links.
@@ -16,7 +17,7 @@ AttendEase is a college attendance web app for visiting faculty and staff. It us
 - Leave requests, approvals, notifications, and daily attendance CSV reports.
 - Role-based screens for faculty/staff, HODs, and the college administrator.
 
-Workday attendance and per-lecture attendance are recorded separately. Lecture punch-in opens 15 minutes before the scheduled start and closes at the scheduled end; punch-out closes 15 minutes after the scheduled end. Approved additional lectures can also be punched. GPS geofencing is not implemented. Email delivery requires SMTP configuration. Face liveness runs locally with the bundled MiniFASNet ONNX models; the model has not been independently validated for this application's cameras or deployment and this college project is not production-hardened.
+Workday attendance and per-lecture attendance are recorded separately. Dashboard hours compare elapsed scheduled lecture time against lecture punch records; future class time is not counted as missed. Lecture punch-in opens 15 minutes before the scheduled start and closes at the scheduled end; punch-out closes 15 minutes after the scheduled end. Approved additional lectures can also be punched. GPS geofencing is not implemented. Email delivery requires SMTP configuration. Face liveness runs locally with the bundled MiniFASNet ONNX models; the model has not been independently validated for this application's cameras or deployment and this college project is not production-hardened.
 
 ## Prerequisites
 
@@ -59,6 +60,8 @@ In `backend\.env`, set `DATABASE_URL` to use the same password from the SQL quer
 DATABASE_URL=mysql+pymysql://attendease_app:YOUR_DB_PASSWORD@127.0.0.1:3306/attendease_db?charset=utf8mb4
 ```
 
+Attendance uses the campus timezone (`Asia/Kolkata` by default). If your campus is elsewhere, set `ATTENDANCE_TIMEZONE` in `backend\.env` to its IANA timezone (for example, `America/New_York`) and restart the backend.
+
 Also set `SECRET_KEY` to a unique random value of at least 32 characters. Generate one with:
 
 ```powershell
@@ -93,6 +96,8 @@ Provision the first college and its administrator from the backend terminal:
 
 Enter the college name and its unique College ID when prompted. The bootstrap command is for the initial administrator; additional active colleges must be provisioned by an authorized database administrator with a unique `colleges.code`. The registration dropdown displays active colleges, and the entered College ID is checked against that college's code.
 
+Each Super Admin and HOD signs in with an individual username and password; usernames are unique across all colleges and are linked to the account's college. The bootstrap command asks for the first Super Admin's username. Existing administrators receive a username during `alembic upgrade head`, based on their college code and employee ID (normalized to letters, numbers, dots, underscores, and hyphens); passwords are unchanged. If a generated username conflicts with another account, the migration appends a numeric suffix. Admins sign in at `/admin/login` without email OTP. HOD usernames are entered when a Super Admin creates their account in **People & setup**.
+
 Start the API:
 
 ```powershell
@@ -112,7 +117,7 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 & 'C:\Program Files\nodejs\npm.cmd' run dev
 ```
 
-Open the local address printed by Vite (usually `http://localhost:5173`). Staff and faculty use `/user/login` (or `/`), where new users can register. Super Admins and HODs use the separate `/admin/login` portal; admin accounts cannot register from the public user portal. The OTP verification endpoint enforces the portal role before creating a session. Colleges and their unique IDs must be provisioned by an administrator before users can register; the registration page only lists active colleges. The user selects a college, enters the College ID supplied by its administrator, and receives an email OTP. The permanent user account is created only after the OTP is verified. Sign in with the registered email; the sign-in code is sent to that email, expires in 2–5 minutes based on the college's policy (five minutes by default), and can be resent once per minute. Complete face enrollment and wait for an administrator to approve it before using punch-in or punch-out.
+Open the local address printed by Vite (usually `http://localhost:5173`). Staff and faculty use `/user/login` (or `/`), where new users can register. Super Admins and HODs use the separate `/admin/login` portal; admin accounts cannot register from the public user portal and use username/password sign-in without email OTP. Colleges and their unique IDs must be provisioned by an administrator before users can register; the registration page only lists active colleges. The user selects a college, enters the College ID supplied by its administrator, and receives an email OTP. The permanent user account is created only after the OTP is verified. Sign in with the registered email; the sign-in code is sent to that email, expires in 2–5 minutes based on the college's policy (five minutes by default), and can be resent once per minute. Complete face enrollment and wait for an administrator to approve it before using punch-in or punch-out.
 
 Share the college code only with people who should join the college. Use **People & setup** to create departments and working shifts, **Timetable** to assign recurring lectures, and **Approvals** to review face enrollments. Use **Additional lectures** to review extra-class requests. Faculty and staff see their schedule and requests in the user portal. Payments are not included in the user dashboard.
 
