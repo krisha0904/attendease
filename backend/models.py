@@ -22,7 +22,10 @@ def utcnow():
 
 class UserRole(str, enum.Enum):
     SUPER_ADMIN = "super_admin"
+    COLLEGE_ADMIN = "college_admin"
     HOD = "hod"
+    ATTENDANCE_MANAGER = "attendance_manager"
+    READ_ONLY_ADMIN = "read_only_admin"
     FACULTY = "faculty"
     STAFF = "staff"
 
@@ -158,6 +161,11 @@ class User(Base):
     face_enrollment_status = Column(Enum(BiometricStatus), default=BiometricStatus.NOT_ENROLLED)
     profile_photo = Column(String(500))
     date_of_joining = Column(Date)
+    gender = Column(String(20), nullable=True)
+    qualification = Column(String(255), nullable=True)
+    specialization = Column(String(255), nullable=True)
+    experience_years = Column(Float, nullable=True)
+    address = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -782,3 +790,237 @@ class Task(Base):
         Index("idx_tasks_college_assignee", "college_id", "assignee_id"),
         Index("idx_tasks_project", "project_id"),
     )
+
+
+class Course(Base):
+    __tablename__ = "courses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    name = Column(String(200), nullable=False)
+    code = Column(String(50), nullable=False)
+    duration_years = Column(Integer, default=3)
+    total_semesters = Column(Integer, default=6)
+    description = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    college = relationship("College")
+    department = relationship("Department")
+
+    __table_args__ = (
+        UniqueConstraint("college_id", "code", name="uq_course_college_code"),
+        Index("idx_courses_college_dept", "college_id", "department_id"),
+    )
+
+
+class Subject(Base):
+    __tablename__ = "subjects"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
+    semester = Column(Integer, default=1)
+    name = Column(String(200), nullable=False)
+    code = Column(String(50), nullable=False)
+    credits = Column(Integer, default=4)
+    subject_type = Column(String(50), default="Theory")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    college = relationship("College")
+    department = relationship("Department")
+    course = relationship("Course")
+
+    __table_args__ = (
+        UniqueConstraint("college_id", "code", name="uq_subject_college_code"),
+        Index("idx_subjects_college_dept", "college_id", "department_id"),
+    )
+
+
+class FacultySubjectAssignment(Base):
+    __tablename__ = "faculty_subject_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False)
+    academic_year_id = Column(Integer, nullable=True)
+    assigned_at = Column(DateTime, default=utcnow)
+
+    faculty = relationship("User", foreign_keys=[faculty_id])
+    subject = relationship("Subject", foreign_keys=[subject_id])
+
+    __table_args__ = (
+        UniqueConstraint("college_id", "faculty_id", "subject_id", name="uq_faculty_subject_assignment"),
+    )
+
+
+class AcademicYear(Base):
+    __tablename__ = "academic_years"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(100), nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    is_current = Column(Boolean, default=False)
+    is_archived = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=utcnow)
+
+    college = relationship("College")
+
+    __table_args__ = (
+        UniqueConstraint("college_id", "name", name="uq_academic_year_name"),
+    )
+
+
+class Classroom(Base):
+    __tablename__ = "classrooms"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    room_number = Column(String(50), nullable=False)
+    building = Column(String(100), nullable=True)
+    floor = Column(String(50), nullable=True)
+    capacity = Column(Integer, default=60)
+    room_type = Column(String(50), default="Lecture Hall")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    college = relationship("College")
+
+    __table_args__ = (
+        UniqueConstraint("college_id", "room_number", name="uq_classroom_room_number"),
+    )
+
+
+class AttendanceCorrection(Base):
+    __tablename__ = "attendance_corrections"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    attendance_record_id = Column(Integer, ForeignKey("attendance_records.id", ondelete="SET NULL"), nullable=True)
+    lecture_record_id = Column(Integer, ForeignKey("lecture_attendance_records.id", ondelete="SET NULL"), nullable=True)
+    target_date = Column(Date, nullable=False)
+    original_punch_in = Column(DateTime, nullable=True)
+    original_punch_out = Column(DateTime, nullable=True)
+    requested_punch_in = Column(DateTime, nullable=True)
+    requested_punch_out = Column(DateTime, nullable=True)
+    reason = Column(Text, nullable=False)
+    status = Column(String(20), default="pending")
+    admin_remarks = Column(Text, nullable=True)
+    reviewed_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    faculty = relationship("User", foreign_keys=[faculty_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by_id])
+
+    __table_args__ = (
+        Index("idx_corrections_college_faculty", "college_id", "faculty_id"),
+    )
+
+
+class FacultyAvailability(Base):
+    __tablename__ = "faculty_availabilities"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    day_of_week = Column(Integer, nullable=False)
+    start_time = Column(Time, nullable=False)
+    end_time = Column(Time, nullable=False)
+    is_available = Column(Boolean, default=True)
+    status = Column(String(20), default="approved")
+    notes = Column(String(255), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    faculty = relationship("User", foreign_keys=[faculty_id])
+
+    __table_args__ = (
+        Index("idx_availability_faculty_day", "college_id", "faculty_id", "day_of_week"),
+    )
+
+
+class SubstituteAssignment(Base):
+    __tablename__ = "substitute_assignments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    lecture_id = Column(Integer, ForeignKey("weekly_lectures.id", ondelete="CASCADE"), nullable=False)
+    lecture_date = Column(Date, nullable=False)
+    original_faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    substitute_faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), default="pending")
+    remarks = Column(Text, nullable=True)
+    assigned_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    lecture = relationship("WeeklyLecture")
+    original_faculty = relationship("User", foreign_keys=[original_faculty_id])
+    substitute_faculty = relationship("User", foreign_keys=[substitute_faculty_id])
+
+    __table_args__ = (
+        Index("idx_substitute_date_lecture", "college_id", "lecture_date", "lecture_id"),
+    )
+
+
+class FacultyPaymentRate(Base):
+    __tablename__ = "faculty_payment_rates"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), nullable=True)
+    rate_per_lecture = Column(Float, default=0.0)
+    rate_per_hour = Column(Float, default=0.0)
+    effective_from = Column(Date, default=utcnow)
+    created_at = Column(DateTime, default=utcnow)
+
+    faculty = relationship("User", foreign_keys=[faculty_id])
+    subject = relationship("Subject", foreign_keys=[subject_id])
+
+
+class BackupRecord(Base):
+    __tablename__ = "backup_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    filename = Column(String(255), nullable=False)
+    file_size_bytes = Column(BigInteger, default=0)
+    backup_type = Column(String(50), default="database")
+    status = Column(String(20), default="completed")
+    notes = Column(Text, nullable=True)
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+
+# ===========================================================================
+# ADMIN USERS  (dedicated admin portal accounts — one per college)
+# ===========================================================================
+
+class AdminUser(Base):
+    """
+    Standalone admin accounts for the Admin Portal.
+    Completely separate from the regular users table.
+    Each college has exactly one admin account identified by a unique username.
+    """
+    __tablename__ = "admin_users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False, unique=True)
+    username = Column(String(150), nullable=False, unique=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
+
+    college = relationship("College")
+

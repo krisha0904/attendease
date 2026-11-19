@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -58,9 +58,8 @@ class PasswordLogin(BaseModel):
 
 
 class AdminUsernameLogin(BaseModel):
-    username: str = Field(min_length=3, max_length=150, pattern=r"^[A-Za-z0-9._-]+$")
+    username: str = Field(min_length=1, max_length=150)
     password: str = Field(min_length=1, max_length=128)
-    device_info: str | None = Field(default=None, max_length=500)
 
 
 class RegistrationRequest(BaseModel):
@@ -326,6 +325,8 @@ class UserSummary(BaseModel):
     role: models.UserRole
     is_active: bool
     face_enrollment_status: models.BiometricStatus
+    college_name: str | None = None
+    college_code: str | None = None
 
 
 def _secret_key() -> str:
@@ -406,6 +407,46 @@ def _user_payload(user: models.User) -> dict:
     }
 
 
+def _admin_user_payload(admin: models.AdminUser) -> dict:
+    return {
+        "id": admin.id,
+        "full_name": admin.full_name,
+        "username": admin.username,
+        "college_id": admin.college_id,
+        "role": "super_admin",
+        # Provide defaults so the frontend's User type stays compatible
+        "employee_id": None,
+        "email": None,
+        "department_id": None,
+        "shift_id": None,
+        "designation": None,
+        "face_enrollment_status": "not_enrolled",
+    }
+
+
+def _make_admin_access_token(admin: models.AdminUser) -> str:
+    now = _utcnow()
+    claims = {
+        "sub": f"admin:{admin.id}",
+        "college_id": admin.college_id,
+        "iat": now,
+        "exp": now + timedelta(hours=8),  # 8-hour stateless admin token
+        "type": "admin_access",
+        "is_admin": True,
+    }
+    return jwt.encode(claims, _secret_key(), algorithm=JWT_ALGORITHM)
+
+
+def _issue_admin_session(admin: models.AdminUser, request: Request, db: Session) -> dict:  # noqa: ARG001
+    access_token = _make_admin_access_token(admin)
+    return {
+        "access_token": access_token,
+        "refresh_token": None,
+        "token_type": "bearer",
+        "user": _admin_user_payload(admin),
+    }
+
+
 def _validate_capture_frames(frames: list[str]) -> None:
     if any(len(frame.encode("utf-8")) > 7_000_000 for frame in frames):
         raise ValueError("An individual capture frame exceeds the 5 MB image limit.")
@@ -483,6 +524,15 @@ def get_current_user(
     if session is None or user is None:
         raise unauthorized
     return user
+
+
+ADMIN_ROLES = (
+    models.UserRole.SUPER_ADMIN,
+    models.UserRole.COLLEGE_ADMIN,
+    models.UserRole.HOD,
+    models.UserRole.ATTENDANCE_MANAGER,
+    models.UserRole.READ_ONLY_ADMIN,
+)
 
 
 def require_roles(*roles: models.UserRole) -> Callable:
@@ -1415,11 +1465,13 @@ def create_app() -> FastAPI:
     ):
         now = _utcnow()
         ip_address = request.client.host if request.client else None
+
+        # Rate-limit by IP (20 failures in 15 min)
         if ip_address:
             recent_ip_failures = (
                 db.query(models.SecurityEvent.id)
                 .filter(
-                    models.SecurityEvent.event_type == "auth.password.failed",
+                    models.SecurityEvent.event_type == "auth.admin.failed",
                     models.SecurityEvent.ip_address == ip_address,
                     models.SecurityEvent.created_at >= now - timedelta(minutes=15),
                 )
@@ -1433,42 +1485,28 @@ def create_app() -> FastAPI:
                 )
 
         username = payload.username.strip().lower()
-        user = (
-            db.query(models.User)
-            .join(models.College, models.College.id == models.User.college_id)
+        admin = (
+            db.query(models.AdminUser)
             .filter(
-                func.lower(models.User.username) == username,
-                models.User.role.in_((models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
-                models.User.is_active.is_(True),
-                models.College.is_active.is_(True),
+                func.lower(models.AdminUser.username) == username,
+                models.AdminUser.is_active.is_(True),
             )
             .first()
         )
-        recent_user_failures = 0
-        if user is not None:
-            recent_user_failures = (
-                db.query(models.SecurityEvent.id)
-                .filter(
-                    models.SecurityEvent.event_type == "auth.password.failed",
-                    models.SecurityEvent.user_id == user.id,
-                    models.SecurityEvent.created_at >= now - timedelta(minutes=15),
-                )
-                .limit(5)
-                .count()
-            )
 
-        password_matches = verify_password(
+        password_ok = verify_password(
             payload.password,
-            user.password_hash if user is not None and recent_user_failures < 5 else None,
+            admin.password_hash if admin is not None else None,
         )
-        if user is None or recent_user_failures >= 5 or not password_matches:
+
+        if admin is None or not password_ok:
             db.add(
                 models.SecurityEvent(
-                    college_id=user.college_id if user is not None else None,
-                    user_id=user.id if user is not None else None,
-                    event_type="auth.password.failed",
+                    college_id=admin.college_id if admin is not None else None,
+                    user_id=None,
+                    event_type="auth.admin.failed",
                     severity="medium",
-                    description="Admin username/password sign-in failed.",
+                    description="Admin portal sign-in failed.",
                     ip_address=ip_address,
                 )
             )
@@ -1477,7 +1515,8 @@ def create_app() -> FastAPI:
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Username or password is incorrect.",
             )
-        return _issue_session(user, request, db, payload.device_info)
+
+        return _issue_admin_session(admin, request, db)
 
     @app.post("/auth/password/change")
     def change_password(
@@ -1709,7 +1748,11 @@ def create_app() -> FastAPI:
 
     @app.get("/auth/me", response_model=UserSummary)
     def get_me(user: models.User = Depends(get_current_user)):
-        return user
+        summary = UserSummary.model_validate(user)
+        if user.college:
+            summary.college_name = user.college.name
+            summary.college_code = user.college.code
+        return summary
 
     @app.get("/admin/departments")
     def list_departments(

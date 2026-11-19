@@ -6,8 +6,10 @@ import {
 } from 'lucide-react'
 import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens } from './api'
 import { useClock, useReloadable } from './hooks'
+import { AdminSidebar, AdminTopBar, ADMIN_NAV_GROUPS } from './AdminComponents'
+import { AdminViewDispatcher } from './AdminViewDispatcher'
 
-type Role = 'super_admin' | 'hod' | 'faculty' | 'staff'
+type Role = 'super_admin' | 'college_admin' | 'hod' | 'attendance_manager' | 'read_only_admin' | 'faculty' | 'staff'
 type Portal = 'admin' | 'user'
 type User = {
   id: number
@@ -22,6 +24,8 @@ type User = {
   role: Role
   is_active: boolean
   face_enrollment_status: string
+  college_name?: string | null
+  college_code?: string | null
 }
 type Attendance = {
   id: number
@@ -167,7 +171,7 @@ const adminNavigation: NavItem[] = [
 ]
 
 function isManager(role: Role) {
-  return role === 'super_admin' || role === 'hod'
+  return role === 'super_admin' || role === 'college_admin' || role === 'hod' || role === 'attendance_manager' || role === 'read_only_admin'
 }
 
 function portalForRole(role: Role): Portal {
@@ -463,7 +467,7 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
           {portal === 'admin' && mode === 'login' ? <>
             <label>Admin username<input value={username} onChange={(event) => setUsername(event.target.value)} required minLength={3} maxLength={150} autoComplete="username" /></label>
             <label>Password<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
-          </> : portal === 'user' && <label>Email address>
+          </> : portal === 'user' && <label>Email address
             <input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required disabled={isVerifying} placeholder="you@college.edu" />
           </label>}
           {mode === 'register' ? <label>Password
@@ -2129,6 +2133,69 @@ function App() {
   if (checking) return <div className="boot-screen"><span className="spinner" />Checking your secure session…</div>
   if (!user) return <><Login portal={requestedPortal} onLogin={acceptUser} />{logoutError && <div className="toast-error">{logoutError}</div>}</>
 
+  if (isManager(user.role)) {
+    const adminPage = page === 'Dasboard ' ? 'dashboard' : page
+    let activeLabel = 'Dashboard'
+    let activeCategory = 'Main Dashboard'
+    for (const group of ADMIN_NAV_GROUPS) {
+      const match = group.items.find((item) => item.key === adminPage)
+      if (match) {
+        activeLabel = match.label
+        activeCategory = group.title
+        break
+      }
+    }
+
+    return (
+      <div className="admin-portal-shell">
+        <AdminSidebar
+          currentPage={adminPage}
+          onSelectPage={selectPage}
+          onSignOut={() => void signOut()}
+          userRole={user.role}
+          userName={user.full_name}
+          collegeName={user.college_name}
+          mobileOpen={mobileMenu}
+          onCloseMobile={() => setMobileMenu(false)}
+        />
+        <main className="admin-main-wrapper">
+          <AdminTopBar
+            currentPageTitle={activeLabel}
+            currentCategory={activeCategory}
+            userName={user.full_name}
+            userEmail={user.email}
+            onOpenMobile={() => setMobileMenu(true)}
+            onSignOut={() => void signOut()}
+            onSelectPage={selectPage}
+          />
+          {logoutError && <div className="logout-warning">{logoutError}</div>}
+          {pageMessage && <div className="notice notice-success"><Check size={17} />{pageMessage}</div>}
+
+          <AdminViewDispatcher
+            page={adminPage}
+            user={user}
+            onNavigate={selectPage}
+            existingComponents={{
+              dashboard: <Dasboard user={user} navigate={selectPage} />,
+              timetable: <TimetablePage user={user} />,
+              attendance: <AttendancePage />,
+              leave: <LeavePage user={user} />,
+              approvals: <ApprovalsPage />,
+              reports: <ReportsPage user={user} />,
+              people: <PeoplePage />,
+              directory: <DirectoryPage />,
+              notifications: <NotificationsPage />,
+            }}
+          />
+          <footer className="app-footer">
+            <span>AttendEase Enterprise · Multi-Tenant Campus Node</span>
+            <span><ShieldCheck size={14} /> Encrypted Session Active</span>
+          </footer>
+        </main>
+      </div>
+    )
+  }
+
   return (
     <div className={`app-shell ${isManager(user.role) ? 'admin-portal-shell' : 'user-portal-shell'}`}>
       <aside className={`sidebar ${mobileMenu ? 'sidebar-open' : ''}`}>
@@ -2153,13 +2220,10 @@ function App() {
         {page === 'projects' && <ProjectsPage user={user} navigate={selectPage} />}
         {page === 'enrollment' && <EnrollmentPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
         {page === 'leave' && <LeavePage user={user} />}
-        {page === 'approvals' && isManager(user.role) && <ApprovalsPage />}
-        {page === 'reports' && isManager(user.role) && <ReportsPage user={user} />}
-        {page === 'people' && user.role === 'super_admin' && <PeoplePage />}
         {page === 'directory' && <DirectoryPage />}
         {page === 'notifications' && <NotificationsPage />}
         {page === 'profile' && <ProfilePage user={user} />}
-        {!navigation.some((item) => item.key === page) && <Dasboard  user={user} navigate={selectPage} />}
+        {!navigation.some((item) => item.key === page) && <UserDashboard user={user} navigate={selectPage} />}
         <footer className="app-footer"><span>AttendEase · College attendance</span><span><ShieldCheck size={14} /> Secure session</span></footer>
       </main>
     </div>
