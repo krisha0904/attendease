@@ -3,10 +3,18 @@ import {
   Activity, BookOpen, Building2, Calendar, CalendarDays,
   CheckCircle2, Clock3, CreditCard, Database, Download, FileEdit,
   FileSpreadsheet, Fingerprint, GraduationCap, Megaphone, Palmtree,
-  Plus, School, ScrollText, Search, Settings, ShieldAlert,
+  Plus, School, ScrollText, Settings, ShieldAlert,
   ShieldCheck, Sliders, UserCheck, UserPlus, Users, AlertCircle
 } from 'lucide-react'
 import { AdminPageScaffold } from './AdminComponents'
+import { AdminDashboardPage } from './AdminDashboardPage'
+import { VisitingFacultyPage } from './VisitingFacultyPage'
+import { FaceRegistrationPage } from './FaceRegistrationPage'
+import { DepartmentManagementPage } from './DepartmentManagementPage'
+import { CourseSubjectManagementPage } from './CourseSubjectManagementPage'
+import { AcademicYearPage } from './AcademicYearPage'
+import { ClassroomManagementPage } from './ClassroomManagementPage'
+import { HolidayManagementPage } from './HolidayManagementPage'
 
 interface AdminViewProps {
   page: string
@@ -32,319 +40,27 @@ export function AdminViewDispatcher({
   existingComponents = {},
 }: AdminViewProps) {
   // Common search and filter states
-  const [searchTerm, setSearchTerm] = useState('')
-  const [deptFilter, setDeptFilter] = useState('all')
+  const [_searchTerm, _setSearchTerm] = useState('')
+  const [_deptFilter, _setDeptFilter] = useState('all')
 
   switch (page) {
     case 'dashboard':
-      return existingComponents.dashboard ? (
-        <>{existingComponents.dashboard}</>
-      ) : (
-        <AdminPageScaffold
-          title="Executive Dashboard"
-          eyebrow="CAMPUS REAL-TIME MONITOR"
-          description="Live attendance, timetable execution, and operational KPIs across the institution."
-          stats={[
-            { label: 'Visiting Faculty', value: '48', note: '42 Active, 6 On Leave', icon: Users },
-            { label: 'Present Today', value: '38', note: '90.5% Attendance', icon: CheckCircle2 },
-            { label: 'On Campus Now', value: '29', note: 'Active geo-verified session', icon: Building2 },
-            { label: 'Today’s Lectures', value: '64', note: '52 Completed, 4 In-flight', icon: Clock3 },
-          ]}
-        >
-          <div className="admin-card-placeholder">
-            <h3>Live Activity Feed</h3>
-            <p className="muted">Detailed dashboard analytics are configured for Phase 2.</p>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <AdminDashboardPage onNavigate={onNavigate} />
 
     case 'visiting_faculty':
-      return (
-        <AdminPageScaffold
-          title="Visiting Faculty Management"
-          eyebrow="FACULTY DIRECTORY & PROFILES"
-          description="Manage visiting faculty profiles, subject mapping, credentials, and institutional status."
-          actions={
-            <div className="admin-actions-row">
-              <button className="button button-primary" onClick={() => alert('Faculty Registration modal opens in Phase 2')}>
-                <UserPlus size={15} /> Add Visiting Faculty
-              </button>
-              <button className="button button-secondary" onClick={() => onNavigate('import_export')}>
-                <Download size={15} /> Export Directory
-              </button>
-            </div>
-          }
-          stats={[
-            { label: 'Total Visiting Faculty', value: '48', note: 'Across 6 Departments', icon: Users },
-            { label: 'Active Status', value: '44', note: 'Available for scheduling', icon: CheckCircle2 },
-            { label: 'Face Enrolled', value: '41', note: '85.4% Verified', icon: Fingerprint },
-            { label: 'Pending Face Reviews', value: '3', note: 'Requires Admin approval', icon: AlertCircle },
-          ]}
-        >
-          <div className="admin-table-filter-bar">
-            <div className="admin-search-box">
-              <Search size={15} />
-              <input
-                type="text"
-                placeholder="Search faculty by name, ID, qualification..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-            </div>
-            <select value={deptFilter} onChange={(e) => setDeptFilter(e.target.value)} className="admin-select">
-              <option value="all">All Departments</option>
-              <option value="cs">Computer Engineering</option>
-              <option value="it">Information Technology</option>
-              <option value="mech">Mechanical Engineering</option>
-              <option value="mgmt">Business & Management</option>
-            </select>
-          </div>
-
-          <div className="panel admin-table-panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Faculty ID</th>
-                    <th>Name</th>
-                    <th>Department</th>
-                    <th>Specialisation</th>
-                    <th>Contact</th>
-                    <th>Biometrics</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>VF-2025-001</strong></td>
-                    <td>Dr. Rajesh Sharma</td>
-                    <td>Computer Engineering</td>
-                    <td>Machine Learning & AI</td>
-                    <td>rajesh.sharma@college.edu</td>
-                    <td><span className="badge badge-approved">Approved</span></td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td>
-                      <button className="button button-secondary" onClick={() => alert('Viewing profile: Rajesh Sharma')}>
-                        View Profile
-                      </button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td><strong>VF-2025-002</strong></td>
-                    <td>Prof. Anita Desai</td>
-                    <td>Information Technology</td>
-                    <td>Cloud Computing & DevOps</td>
-                    <td>anita.desai@college.edu</td>
-                    <td><span className="badge badge-approved">Approved</span></td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td>
-                      <button className="button button-secondary" onClick={() => alert('Viewing profile: Anita Desai')}>
-                        View Profile
-                      </button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td><strong>VF-2025-003</strong></td>
-                    <td>Dr. Vikram Patel</td>
-                    <td>Mechanical Engineering</td>
-                    <td>Thermodynamics & Robotics</td>
-                    <td>vikram.patel@college.edu</td>
-                    <td><span className="badge badge-pending">Pending Review</span></td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td>
-                      <button className="button button-secondary" onClick={() => onNavigate('face_registration')}>
-                        Review Face
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <VisitingFacultyPage onNavigateToBiometrics={() => onNavigate('face_registration')} />
 
     case 'face_registration':
-      return existingComponents.approvals ? (
-        <AdminPageScaffold
-          title="Face Registration & Biometrics"
-          eyebrow="BIOMETRIC ACCESS CONTROL"
-          description="Review submitted facial enrollments, verify silent anti-spoofing scores, and manage re-registrations."
-          stats={[
-            { label: 'Pending Approvals', value: '3', note: 'Requires Admin verification', icon: Fingerprint },
-            { label: 'Approved Templates', value: '41', note: 'Fernet Encrypted (Local)', icon: CheckCircle2 },
-            { label: 'Rejected / Revoked', value: '2', note: 'Spoof or poor lighting', icon: AlertCircle },
-          ]}
-        >
-          {existingComponents.approvals}
-        </AdminPageScaffold>
-      ) : (
-        <AdminPageScaffold
-          title="Face Registration & Biometrics"
-          eyebrow="BIOMETRIC ACCESS CONTROL"
-          description="Review submitted facial enrollments, verify silent anti-spoofing scores, and manage re-registrations."
-        >
-          <div className="panel">
-            <p className="muted">Biometric approval workflows are connected to the approvals service.</p>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <FaceRegistrationPage />
 
     case 'departments':
-      return (
-        <AdminPageScaffold
-          title="Department Management"
-          eyebrow="ACADEMIC STRUCTURE"
-          description="Configure institution departments, academic units, HOD assignments, and faculty allocations."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Add Department')}>
-              <Plus size={15} /> Add Department
-            </button>
-          }
-          stats={[
-            { label: 'Total Departments', value: '6', note: 'All Active', icon: Building2 },
-            { label: 'Department Heads', value: '6', note: 'Assigned HOD Accounts', icon: Users },
-            { label: 'Mapped Subjects', value: '42', note: 'Current Semester', icon: BookOpen },
-          ]}
-        >
-          {existingComponents.people ? (
-            <div className="panel">{existingComponents.people}</div>
-          ) : (
-            <div className="panel">
-              <p className="muted">Department directory and setup loaded.</p>
-            </div>
-          )}
-        </AdminPageScaffold>
-      )
+      return <DepartmentManagementPage />
 
     case 'courses_subjects':
-      return (
-        <AdminPageScaffold
-          title="Course & Subject Management"
-          eyebrow="CURRICULUM & SYLLABUS"
-          description="Define academic degree courses, semesters, subjects, credits, and faculty allocations."
-          actions={
-            <div className="admin-actions-row">
-              <button className="button button-primary" onClick={() => alert('Add Subject')}>
-                <Plus size={15} /> Add Subject
-              </button>
-              <button className="button button-secondary" onClick={() => alert('Add Course')}>
-                <Plus size={15} /> Add Course
-              </button>
-            </div>
-          }
-          stats={[
-            { label: 'Offered Courses', value: '8', note: 'B.Tech, M.Tech, MBA', icon: GraduationCap },
-            { label: 'Active Subjects', value: '54', note: 'Theory & Practicals', icon: BookOpen },
-            { label: 'Assigned Faculty', value: '42', note: '100% Curriculum coverage', icon: Users },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Subject Code</th>
-                    <th>Subject Name</th>
-                    <th>Course & Sem</th>
-                    <th>Department</th>
-                    <th>Credits</th>
-                    <th>Assigned Faculty</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>CS501</strong></td>
-                    <td>Artificial Intelligence & Expert Systems</td>
-                    <td>B.Tech (Sem 5)</td>
-                    <td>Computer Engineering</td>
-                    <td>4</td>
-                    <td>Dr. Rajesh Sharma</td>
-                    <td><button className="button button-secondary">Edit</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>IT402</strong></td>
-                    <td>Cloud Computing Architecture</td>
-                    <td>B.Tech (Sem 4)</td>
-                    <td>Information Technology</td>
-                    <td>4</td>
-                    <td>Prof. Anita Desai</td>
-                    <td><button className="button button-secondary">Edit</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>ME603</strong></td>
-                    <td>Advanced Robotics & Automation</td>
-                    <td>B.Tech (Sem 6)</td>
-                    <td>Mechanical Engineering</td>
-                    <td>3</td>
-                    <td>Dr. Vikram Patel</td>
-                    <td><button className="button button-secondary">Edit</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <CourseSubjectManagementPage />
 
     case 'academic_years':
-      return (
-        <AdminPageScaffold
-          title="Academic Year Management"
-          eyebrow="INSTITUTIONAL CALENDAR"
-          description="Manage academic cycles, terms, semesters, and archival of historical records."
-          actions={
-            <button className="button button-primary" onClick={() => alert('New Academic Year')}>
-              <Plus size={15} /> Create Academic Cycle
-            </button>
-          }
-          stats={[
-            { label: 'Current Academic Year', value: '2025-2026', note: 'Active Cycle (Term 1)', icon: CalendarDays },
-            { label: 'Cycle Duration', value: 'Jul 2025 – Jun 2026', note: 'In Progress', icon: Clock3 },
-            { label: 'Archived Cycles', value: '3', note: 'Fully Preserved Data', icon: Database },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Academic Year</th>
-                    <th>Start Date</th>
-                    <th>End Date</th>
-                    <th>Status</th>
-                    <th>Enrolled Faculty</th>
-                    <th>Total Lectures</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr className="row-highlight">
-                    <td><strong>2025-2026</strong></td>
-                    <td>01 Jul 2025</td>
-                    <td>30 Jun 2026</td>
-                    <td><span className="badge badge-approved">Active Current</span></td>
-                    <td>48</td>
-                    <td>1,240</td>
-                    <td><span className="badge badge-approved">Default</span></td>
-                  </tr>
-                  <tr>
-                    <td><strong>2024-2025</strong></td>
-                    <td>01 Jul 2024</td>
-                    <td>30 Jun 2025</td>
-                    <td><span className="badge badge-revoked">Archived</span></td>
-                    <td>45</td>
-                    <td>2,480</td>
-                    <td><button className="button button-secondary">View Records</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <AcademicYearPage />
 
     case 'timetable':
       return existingComponents.timetable ? (
@@ -369,132 +85,10 @@ export function AdminViewDispatcher({
       )
 
     case 'classrooms':
-      return (
-        <AdminPageScaffold
-          title="Classroom Management"
-          eyebrow="CAMPUS INFRASTRUCTURE"
-          description="Classroom listings, lab capacities, smart board setups, and room collision prevention."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Add Classroom')}>
-              <Plus size={15} /> Add Classroom
-            </button>
-          }
-          stats={[
-            { label: 'Total Classrooms', value: '32', note: 'Across 3 Blocks', icon: School },
-            { label: 'Lecture Theatres', value: '8', note: '120+ Capacity', icon: Building2 },
-            { label: 'Specialized Labs', value: '14', note: 'Computer & Hardware Labs', icon: Sliders },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Room Number</th>
-                    <th>Building / Block</th>
-                    <th>Floor</th>
-                    <th>Capacity</th>
-                    <th>Type</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>LH-101</strong></td>
-                    <td>Aryabhata Block</td>
-                    <td>1st Floor</td>
-                    <td>120 Seats</td>
-                    <td>Smart Lecture Theatre</td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td><button className="button button-secondary">Schedule</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>CS-LAB-3</strong></td>
-                    <td>Turing Computing Centre</td>
-                    <td>2nd Floor</td>
-                    <td>60 Workstations</td>
-                    <td>High-Performance Computing Lab</td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td><button className="button button-secondary">Schedule</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>ME-WS-2</strong></td>
-                    <td>Mechanical Workshop</td>
-                    <td>Ground Floor</td>
-                    <td>40 Stations</td>
-                    <td>Robotics & Mechatronics Lab</td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td><button className="button button-secondary">Schedule</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <ClassroomManagementPage />
 
     case 'holidays':
-      return (
-        <AdminPageScaffold
-          title="Holiday Management"
-          eyebrow="CALENDAR & NON-WORKING DAYS"
-          description="Configure national holidays, institutional gazetted breaks, and department-specific holidays."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Add Holiday')}>
-              <Plus size={15} /> Add Holiday
-            </button>
-          }
-          stats={[
-            { label: 'Institutional Holidays', value: '18', note: 'Academic Year 2025-26', icon: Palmtree },
-            { label: 'Upcoming Holiday', value: 'Republic Day', note: '26 Jan 2026', icon: Calendar },
-            { label: 'Protected Lectures', value: '0 Conflicting', note: 'Timetable check clean', icon: CheckCircle2 },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Holiday Name</th>
-                    <th>Date</th>
-                    <th>Day</th>
-                    <th>Applicability</th>
-                    <th>Description</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>Republic Day</strong></td>
-                    <td>26 Jan 2026</td>
-                    <td>Monday</td>
-                    <td>All Institutional Departments</td>
-                    <td>National Holiday</td>
-                    <td><button className="button button-secondary">Edit</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>Maha Shivratri</strong></td>
-                    <td>17 Feb 2026</td>
-                    <td>Tuesday</td>
-                    <td>All Institutional Departments</td>
-                    <td>Gazetted Holiday</td>
-                    <td><button className="button button-secondary">Edit</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>Holi</strong></td>
-                    <td>04 Mar 2026</td>
-                    <td>Wednesday</td>
-                    <td>All Institutional Departments</td>
-                    <td>Festival Break</td>
-                    <td><button className="button button-secondary">Edit</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <HolidayManagementPage />
 
     case 'attendance':
       return existingComponents.attendance ? (

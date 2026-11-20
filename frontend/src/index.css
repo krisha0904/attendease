@@ -1282,3 +1282,530 @@ textarea { resize: vertical; }
     grid-template-columns: 1fr;
   }
 }
+
+/* ==========================================================================
+   PHASE 2: DASHBOARD & FACULTY MANAGEMENT STYLES
+   ========================================================================== */
+
+.live-pulse-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #166534;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.6px;
+}
+
+.live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.3);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+  70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+.bg-blue-subtle { background: #eff6ff !important; }
+.bg-green-subtle { background: #f0fdf4 !important; }
+.bg-amber-subtle { background: #fffbeb !important; }
+.bg-red-subtle { background: #fef2f2 !important; }
+.bg-indigo-subtle { background: #eef2ff !important; }
+.bg-purple-subtle { background: #faf5ff !important; }
+
+.text-blue { color: #2563eb !important; }
+.text-green { color: #16a34a !important; }
+.text-amber { color: #d97706 !important; }
+.text-red { color: #dc2626 !important; }
+.text-indigo { color: #4f46e5 !important; }
+.text-purple { color: #9333ea !important; }
+
+.admin-kpi-grid-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+}
+
+.department-attendance-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dept-attendance-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dept-attendance-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12.5px;
+}
+
+.dept-progress-wrap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dept-progress-bar {
+  flex: 1;
+  height: 8px;
+  background: #f1f5f9;
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.dept-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2563eb, #38bdf8);
+  border-radius: 99px;
+  transition: width 0.4s ease;
+}
+
+.dept-pct {
+  font-size: 11px;
+  font-weight: 700;
+  color: #334155;
+  min-width: 38px;
+  text-align: right;
+}
+
+.admin-lecture-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.admin-lecture-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 9px;
+  border: 1px solid #f1f5f9;
+  background: #f8fafc;
+  gap: 12px;
+}
+
+.admin-lecture-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #64748b;
+  min-width: 105px;
+}
+
+.admin-lecture-details {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-lecture-details strong {
+  font-size: 12.5px;
+  color: #0f172a;
+}
+
+.admin-lecture-details span {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.admin-three-col-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.mini-feed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mini-feed-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.mini-feed-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #eff6ff;
+  color: #2563eb;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+}
+
+.mini-feed-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.mini-feed-info strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.mini-feed-info span {
+  font-size: 10.5px;
+  color: #64748b;
+}
+
+.alert-item {
+  background: #fef2f2 !important;
+  border: 1px solid #fee2e2;
+}
+
+.clean-alert-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 8px;
+  background: #f0fdf4;
+  color: #166534;
+  font-size: 12px;
+}
+
+/* Faculty Management Specifics */
+.admin-filters-flex {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.faculty-row-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.faculty-avatar-circle {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #1e3a8a;
+  color: #93c5fd;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.faculty-code-tag {
+  font-size: 10.5px;
+  color: #64748b;
+  font-family: monospace;
+}
+
+.dept-tag {
+  display: inline-block;
+  padding: 3px 8px;
+  background: #f1f5f9;
+  border-radius: 6px;
+  font-size: 11px;
+  color: #334155;
+  font-weight: 600;
+}
+
+.contact-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11.5px;
+}
+
+.button-sm {
+  min-height: 28px !important;
+  padding: 0 8px !important;
+  font-size: 10.5px !important;
+}
+
+.admin-pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pagination-page-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  color: #475569;
+}
+
+/* Modal Windows */
+.admin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.admin-modal {
+  width: min(720px, 100%);
+  max-height: 90vh;
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.admin-profile-modal {
+  width: min(960px, 100%) !important;
+}
+
+.admin-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 24px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+}
+
+.admin-modal-body {
+  padding: 24px;
+  overflow-y: auto;
+  max-height: calc(85vh - 130px);
+}
+
+.admin-modal-footer {
+  padding: 14px 24px;
+  border-top: 1px solid #e2e8f0;
+  background: #f8fafc;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.admin-profile-tabs {
+  display: flex;
+  overflow-x: auto;
+  border-bottom: 1px solid #e2e8f0;
+  background: #f8fafc;
+  padding: 0 16px;
+  gap: 4px;
+}
+
+.profile-tab-button {
+  padding: 12px 14px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+
+.profile-tab-button:hover {
+  color: #0f172a;
+}
+
+.profile-tab-button.tab-active {
+  color: #2563eb;
+  border-bottom-color: #2563eb;
+  font-weight: 700;
+}
+
+.profile-tab-content {
+  padding: 24px;
+  overflow-y: auto;
+  max-height: calc(85vh - 170px);
+}
+
+.profile-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.profile-field label {
+  display: block;
+  font-size: 11px;
+  color: #64748b;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.profile-field strong {
+  display: block;
+  font-size: 13.5px;
+  color: #0f172a;
+}
+
+.biometric-overview-box {
+  padding: 16px;
+  border-radius: 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+}
+
+/* Biometric & Face Registration Specifics (Phase 3) */
+.admin-kpi-grid-6 {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+@media (max-width: 1200px) {
+  .admin-kpi-grid-6 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .admin-kpi-grid-6 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.kpi-card-interactive {
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+
+.kpi-card-interactive:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.08);
+}
+
+.kpi-border-green { border-left: 4px solid #16a34a !important; }
+.kpi-border-amber { border-left: 4px solid #d97706 !important; }
+.kpi-border-red { border-left: 4px solid #dc2626 !important; }
+.kpi-border-purple { border-left: 4px solid #9333ea !important; }
+.kpi-border-slate { border-left: 4px solid #64748b !important; }
+
+.biometric-info-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 18px;
+  border-radius: 10px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  color: #0369a1;
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin-bottom: 20px;
+}
+
+.biometric-info-banner strong {
+  color: #0369a1;
+  font-weight: 700;
+}
+
+.badge-re_enrollment_required {
+  color: #7c3aed;
+  border-color: #ddd6fe;
+  background: #f5f3ff;
+}
+
+.nav-tab-counter {
+  display: inline-block;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  border-radius: 99px;
+  background: #e2e8f0;
+  color: #475569;
+  margin-left: 6px;
+}
+
+.nav-tab-counter-highlight {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.admin-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.admin-form-label {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.admin-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  resize: vertical;
+}
+
+.admin-textarea:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
+.pulse-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f59e0b;
+  display: inline-block;
+  margin-left: 6px;
+  animation: pulse 1.8s infinite;
+}
+

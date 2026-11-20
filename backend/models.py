@@ -53,6 +53,7 @@ class BiometricStatus(str, enum.Enum):
     APPROVED = "approved"
     REJECTED = "rejected"
     REVOKED = "revoked"
+    RE_ENROLLMENT_REQUIRED = "re_enrollment_required"
 
 
 class VerificationResult(str, enum.Enum):
@@ -125,11 +126,13 @@ class Department(Base):
     code = Column(String(50))
     description = Column(Text)
     is_active = Column(Boolean, default=True)
+    hod_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     college = relationship("College", back_populates="departments")
-    users = relationship("User", back_populates="department")
+    users = relationship("User", back_populates="department", foreign_keys="[User.department_id]")
+    head_of_department = relationship("User", foreign_keys=[hod_id])
 
     __table_args__ = (
         UniqueConstraint("college_id", "code", name="uq_dept_code"),
@@ -157,6 +160,7 @@ class User(Base):
     designation = Column(String(100))
     role = Column(Enum(UserRole), default=UserRole.FACULTY)
     is_active = Column(Boolean, default=True)
+    account_status = Column(String(20), default="active") # active, inactive, suspended
     face_enrolled = Column(Boolean, default=False)
     face_enrollment_status = Column(Enum(BiometricStatus), default=BiometricStatus.NOT_ENROLLED)
     profile_photo = Column(String(500))
@@ -170,7 +174,7 @@ class User(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     college = relationship("College", back_populates="users")
-    department = relationship("Department", back_populates="users")
+    department = relationship("Department", back_populates="users", foreign_keys=[department_id])
     working_shift = relationship("WorkingShift", back_populates="assigned_users", foreign_keys=[shift_id])
     otp_records = relationship("OTPVerification", back_populates="user")
     biometric_template = relationship(

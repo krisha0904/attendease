@@ -6,7 +6,10 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./attendease_dev.db")
+if os.getenv("ATTENDEASE_TESTING") == "1":
+    DATABASE_URL = "sqlite:///:memory:"
+else:
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./attendease_dev.db")
 engine_options = {"pool_pre_ping": True}
 
 if DATABASE_URL.startswith("sqlite"):
