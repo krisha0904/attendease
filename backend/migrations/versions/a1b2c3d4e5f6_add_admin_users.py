@@ -16,17 +16,18 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "admin_users",
-        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
-        sa.Column("college_id", sa.Integer(), sa.ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False, unique=True),
-        sa.Column("username", sa.String(150), nullable=False, unique=True),
-        sa.Column("password_hash", sa.String(255), nullable=False),
-        sa.Column("full_name", sa.String(255), nullable=False),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
-    )
+    if "admin_users" not in sa.inspect(op.get_bind()).get_table_names():
+        op.create_table(
+            "admin_users",
+            sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+            sa.Column("college_id", sa.Integer(), sa.ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False, unique=True),
+            sa.Column("username", sa.String(150), nullable=False, unique=True),
+            sa.Column("password_hash", sa.String(255), nullable=False),
+            sa.Column("full_name", sa.String(255), nullable=False),
+            sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.true()),
+            sa.Column("created_at", sa.DateTime(), nullable=False),
+            sa.Column("updated_at", sa.DateTime(), nullable=False),
+        )
 
 
 def downgrade() -> None:

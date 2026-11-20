@@ -14,13 +14,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("users", sa.Column("username", sa.String(length=150), nullable=True))
-
     connection = op.get_bind()
+    inspector = sa.inspect(connection)
+    user_columns = {column["name"] for column in inspector.get_columns("users")}
+    if "username" not in user_columns:
+        op.add_column("users", sa.Column("username", sa.String(length=150), nullable=True))
+
     administrators = connection.execute(
         sa.text(
             """
-            SELECT users.id AS user_id, colleges.code AS college_code, users.employee_id
+            SELECT users.id AS user_id, colleges.code AS college_code, users.employee_id, users.username
             FROM users
             JOIN colleges ON colleges.id = users.college_id
             WHERE lower(users.role) IN ('super_admin', 'hod')
@@ -28,8 +31,13 @@ def upgrade() -> None:
             """
         )
     ).mappings().all()
-    used_usernames: set[str] = set()
+    existing_usernames = connection.execute(
+        sa.text("SELECT username FROM users WHERE username IS NOT NULL AND username <> ''")
+    ).scalars().all()
+    used_usernames = {username.lower() for username in existing_usernames}
     for administrator in administrators:
+        if administrator["username"] and administrator["username"].strip():
+            continue
         base_username = re.sub(
             r"[^a-z0-9._-]+",
             "-",
@@ -48,7 +56,13 @@ def upgrade() -> None:
             {"username": username, "user_id": administrator["user_id"]},
         )
 
-    op.create_index("uq_user_username", "users", ["username"], unique=True)
+    inspector = sa.inspect(connection)
+    has_unique_username_index = any(
+        index.get("unique") and index.get("column_names") == ["username"]
+        for index in inspector.get_indexes("users")
+    )
+    if not has_unique_username_index:
+        op.create_index("uq_user_username", "users", ["username"], unique=True)
 
 
 def downgrade() -> None:

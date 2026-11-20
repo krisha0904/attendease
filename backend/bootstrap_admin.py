@@ -33,19 +33,32 @@ def main() -> None:
             raise ValueError("That college code is already registered.")
         if db.query(models.User.id).filter(models.User.username == admin_username).first():
             raise ValueError("That administrator username is already in use.")
+        if db.query(models.AdminUser.id).filter(models.AdminUser.username == admin_username).first():
+            raise ValueError("That administrator username is already in use.")
 
         college = models.College(name=college_name, code=college_code)
         db.add(college)
         db.flush()
+        password_hash = hash_password(password)
+        admin = models.User(
+            college_id=college.id,
+            employee_id=admin_employee_id,
+            full_name=admin_name,
+            email=admin_email,
+            username=admin_username,
+            password_hash=password_hash,
+            role=models.UserRole.SUPER_ADMIN,
+            is_active=True,
+        )
+        db.add(admin)
+        db.flush()
         db.add(
-            models.User(
+            models.AdminUser(
                 college_id=college.id,
-                employee_id=admin_employee_id,
-                full_name=admin_name,
-                email=admin_email,
+                user_id=admin.id,
                 username=admin_username,
-                password_hash=hash_password(password),
-                role=models.UserRole.SUPER_ADMIN,
+                password_hash=password_hash,
+                full_name=admin_name,
                 is_active=True,
             )
         )

@@ -99,7 +99,7 @@ class CollegeLocation(Base):
     __tablename__ = "college_locations"
 
     id = Column(Integer, primary_key=True, index=True)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String(255), nullable=False)
     latitude = Column(Float, nullable=False)
     longitude = Column(Float, nullable=False)
@@ -1008,13 +1008,13 @@ class BackupRecord(Base):
 class AdminUser(Base):
     """
     Standalone admin accounts for the Admin Portal.
-    Completely separate from the regular users table.
-    Each college has exactly one admin account identified by a unique username.
+    Admin credentials are stored separately and linked to an application user.
     """
     __tablename__ = "admin_users"
 
     id = Column(Integer, primary_key=True, index=True)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False, unique=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
     username = Column(String(150), nullable=False, unique=True)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=False)
@@ -1023,4 +1023,5 @@ class AdminUser(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     college = relationship("College")
+    user = relationship("User")
 

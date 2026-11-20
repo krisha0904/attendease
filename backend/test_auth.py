@@ -168,10 +168,30 @@ def test_admin_username_login_identifies_college_without_email_otp(client, monke
         )
         north = db.query(models.User).filter_by(email=north_email).one()
         north.username = "north.admin"
-        north.password_hash = hash_password("North-Admin-Password-123")
+        north.password_hash = hash_password("Different-user-table-password")
         south = db.query(models.User).filter_by(email=south_email).one()
         south.username = "south.hod"
-        south.password_hash = hash_password("South-HOD-Password-123")
+        south.password_hash = hash_password("Different-hod-user-password")
+        db.add_all(
+            [
+                models.AdminUser(
+                    college_id=north.college_id,
+                    user_id=north.id,
+                    username="north.admin",
+                    password_hash=hash_password("North-Admin-Password-123"),
+                    full_name=north.full_name,
+                    is_active=True,
+                ),
+                models.AdminUser(
+                    college_id=south.college_id,
+                    user_id=south.id,
+                    username="south.hod",
+                    password_hash=hash_password("South-HOD-Password-123"),
+                    full_name=south.full_name,
+                    is_active=True,
+                ),
+            ]
+        )
         db.commit()
 
     sent_codes = []
@@ -190,6 +210,10 @@ def test_admin_username_login_identifies_college_without_email_otp(client, monke
     )
     assert north_login.status_code == 200
     assert north_login.json()["user"]["college_id"] == north_id
+    assert test_client.get(
+        "/admin/dashboard",
+        headers={"Authorization": f"Bearer {north_login.json()['access_token']}"},
+    ).status_code == 200
     assert south_login.status_code == 200
     assert south_login.json()["user"]["college_id"] == south_id
     assert north_login.json()["user"]["username"] == "north.admin"
@@ -201,6 +225,23 @@ def test_admin_username_login_identifies_college_without_email_otp(client, monke
         "/auth/login",
         json={"email": north_email, "password": "North-Admin-Password-123"},
     ).status_code == 401
+    change_response = test_client.post(
+        "/auth/password/change",
+        headers={"Authorization": f"Bearer {north_login.json()['access_token']}"},
+        json={
+            "current_password": "North-Admin-Password-123",
+            "new_password": "New-North-Admin-Password-123",
+        },
+    )
+    assert change_response.status_code == 200
+    assert test_client.post(
+        "/auth/admin-login",
+        json={"username": "north.admin", "password": "North-Admin-Password-123"},
+    ).status_code == 401
+    assert test_client.post(
+        "/auth/admin-login",
+        json={"username": "north.admin", "password": "New-North-Admin-Password-123"},
+    ).status_code == 200
 
 
 def test_otp_validity_policy_is_limited_to_two_through_five_minutes():
@@ -523,7 +564,17 @@ def test_admin_user_management_is_role_and_tenant_scoped(client, monkeypatch):
     with test_sessions() as db:
         admin = db.query(models.User).filter_by(email=admin_email).one()
         admin.username = "college-a.admin"
-        admin.password_hash = hash_password("College-Admin-Password-123")
+        admin.password_hash = hash_password("Different-user-table-password")
+        db.add(
+            models.AdminUser(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                username="college-a.admin",
+                password_hash=hash_password("College-Admin-Password-123"),
+                full_name=admin.full_name,
+                is_active=True,
+            )
+        )
         db.commit()
     admin_login = test_client.post(
         "/auth/admin-login",
@@ -554,6 +605,52 @@ def test_admin_user_management_is_role_and_tenant_scoped(client, monkeypatch):
     with test_sessions() as db:
         assert db.query(models.User).filter_by(email="new@example.edu").one().phone == "+15551234567"
 
+    hod_payload = {
+        "employee_id": "HOD-NEW",
+        "full_name": "New HOD",
+        "email": "hod@example.edu",
+        "username": "hod.a",
+        "password": "HOD-Initial-Password-123",
+        "department_id": department_a_id,
+        "role": "hod",
+    }
+    hod_created = test_client.post("/admin/users", json=hod_payload, headers=headers)
+    assert hod_created.status_code == 201
+    with test_sessions() as db:
+        hod_user = db.query(models.User).filter_by(email="hod@example.edu").one()
+        admin_credentials = db.query(models.AdminUser).filter_by(username="hod.a").one()
+        assert admin_credentials.user_id == hod_user.id
+        assert admin_credentials.password_hash == hod_user.password_hash
+    hod_login = test_client.post(
+        "/auth/admin-login",
+        json={"username": "hod.a", "password": "HOD-Initial-Password-123"},
+    )
+    assert hod_login.status_code == 200
+    assert hod_login.json()["user"]["role"] == "hod"
+
+    read_only_created = test_client.post(
+        "/admin/users",
+        headers=headers,
+        json={
+            "employee_id": "READONLY-NEW",
+            "full_name": "Read Only Admin",
+            "email": "read-only@example.edu",
+            "username": "read.only",
+            "password": "Read-Only-Initial-Password-123",
+            "department_id": department_a_id,
+            "role": "read_only_admin",
+        },
+    )
+    assert read_only_created.status_code == 201
+    read_only_login = test_client.post(
+        "/auth/admin-login",
+        json={"username": "read.only", "password": "Read-Only-Initial-Password-123"},
+    )
+    assert read_only_login.status_code == 200
+    read_only_headers = {"Authorization": f"Bearer {read_only_login.json()['access_token']}"}
+    assert test_client.get("/admin/dashboard", headers=read_only_headers).status_code == 200
+    assert test_client.get("/admin/users", headers=read_only_headers).status_code == 403
+
     with test_sessions() as db:
         faculty = models.User(
             college_id=college_a_id,
@@ -574,7 +671,13 @@ def test_admin_user_management_is_role_and_tenant_scoped(client, monkeypatch):
     directory = test_client.get("/directory", headers=faculty_headers)
     assert directory.status_code == 200
     entries = directory.json()
-    assert {entry["email"] for entry in entries} == {admin_email, "new@example.edu", faculty_email}
+    assert {entry["email"] for entry in entries} == {
+        admin_email,
+        "new@example.edu",
+        "hod@example.edu",
+        "read-only@example.edu",
+        faculty_email,
+    }
     assert next(entry for entry in entries if entry["email"] == faculty_email)["phone"] == "+15557654321"
     assert all("password_hash" not in entry for entry in entries)
 
@@ -589,7 +692,18 @@ def test_projects_and_tasks_are_department_scoped_and_assignable(client):
             models.UserRole.HOD,
         )
         manager = db.query(models.User).filter_by(email=manager_email).one()
-        manager.password_hash = hash_password("Manager-Password-123")
+        manager.username = "hod.tasks"
+        manager.password_hash = hash_password("Different-HOD-User-Password")
+        db.add(
+            models.AdminUser(
+                college_id=manager.college_id,
+                user_id=manager.id,
+                username="hod.tasks",
+                password_hash=hash_password("Manager-Password-123"),
+                full_name=manager.full_name,
+                is_active=True,
+            )
+        )
         faculty = models.User(
             college_id=college_id,
             department_id=department_id,
@@ -620,8 +734,8 @@ def test_projects_and_tasks_are_department_scoped_and_assignable(client):
         outside_faculty_id = outside_faculty.id
 
     manager_login = test_client.post(
-        "/auth/login",
-        json={"email": manager_email, "password": "Manager-Password-123"},
+        "/auth/admin-login",
+        json={"username": "hod.tasks", "password": "Manager-Password-123"},
     ).json()
     manager_headers = {"Authorization": f"Bearer {manager_login['access_token']}"}
     project = test_client.post(

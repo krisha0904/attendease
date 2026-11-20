@@ -107,10 +107,16 @@ class EmployeeCreate(BaseModel):
 
     @model_validator(mode="after")
     def require_username_for_admin(self):
-        if self.role == models.UserRole.HOD and not self.username:
-            raise ValueError("An admin username is required for HOD accounts.")
-        if self.role != models.UserRole.HOD and self.username:
-            raise ValueError("Only HOD admin accounts can have a username.")
+        admin_roles = (
+            models.UserRole.COLLEGE_ADMIN,
+            models.UserRole.HOD,
+            models.UserRole.ATTENDANCE_MANAGER,
+            models.UserRole.READ_ONLY_ADMIN,
+        )
+        if self.role in admin_roles and not self.username:
+            raise ValueError("An admin username is required for administrator accounts.")
+        if self.role not in admin_roles and self.username:
+            raise ValueError("Only administrator accounts can have an admin username.")
         if self.username:
             self.username = self.username.strip().lower()
         return self
@@ -404,46 +410,6 @@ def _user_payload(user: models.User) -> dict:
         "designation": user.designation,
         "role": user.role.value,
         "face_enrollment_status": user.face_enrollment_status.value,
-    }
-
-
-def _admin_user_payload(admin: models.AdminUser) -> dict:
-    return {
-        "id": admin.id,
-        "full_name": admin.full_name,
-        "username": admin.username,
-        "college_id": admin.college_id,
-        "role": "super_admin",
-        # Provide defaults so the frontend's User type stays compatible
-        "employee_id": None,
-        "email": None,
-        "department_id": None,
-        "shift_id": None,
-        "designation": None,
-        "face_enrollment_status": "not_enrolled",
-    }
-
-
-def _make_admin_access_token(admin: models.AdminUser) -> str:
-    now = _utcnow()
-    claims = {
-        "sub": f"admin:{admin.id}",
-        "college_id": admin.college_id,
-        "iat": now,
-        "exp": now + timedelta(hours=8),  # 8-hour stateless admin token
-        "type": "admin_access",
-        "is_admin": True,
-    }
-    return jwt.encode(claims, _secret_key(), algorithm=JWT_ALGORITHM)
-
-
-def _issue_admin_session(admin: models.AdminUser, request: Request, db: Session) -> dict:  # noqa: ARG001
-    access_token = _make_admin_access_token(admin)
-    return {
-        "access_token": access_token,
-        "refresh_token": None,
-        "token_type": "bearer",
-        "user": _admin_user_payload(admin),
     }
 
 
@@ -1485,25 +1451,32 @@ def create_app() -> FastAPI:
                 )
 
         username = payload.username.strip().lower()
-        admin = (
+        admin_account = (
             db.query(models.AdminUser)
+            .join(models.User, models.User.id == models.AdminUser.user_id)
+            .join(models.College, models.College.id == models.AdminUser.college_id)
             .filter(
                 func.lower(models.AdminUser.username) == username,
                 models.AdminUser.is_active.is_(True),
+                models.User.college_id == models.AdminUser.college_id,
+                models.User.role.in_(ADMIN_ROLES),
+                models.User.is_active.is_(True),
+                models.College.is_active.is_(True),
             )
             .first()
         )
 
         password_ok = verify_password(
             payload.password,
-            admin.password_hash if admin is not None else None,
+            admin_account.password_hash if admin_account is not None else None,
         )
 
-        if admin is None or not password_ok:
+        if admin_account is None or not password_ok:
+            admin = admin_account.user if admin_account is not None else None
             db.add(
                 models.SecurityEvent(
                     college_id=admin.college_id if admin is not None else None,
-                    user_id=None,
+                    user_id=admin.id if admin is not None else None,
                     event_type="auth.admin.failed",
                     severity="medium",
                     description="Admin portal sign-in failed.",
@@ -1516,7 +1489,7 @@ def create_app() -> FastAPI:
                 detail="Username or password is incorrect.",
             )
 
-        return _issue_admin_session(admin, request, db)
+        return _issue_session(admin_account.user, request, db, None)
 
     @app.post("/auth/password/change")
     def change_password(
@@ -1524,11 +1497,23 @@ def create_app() -> FastAPI:
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        if not verify_password(payload.current_password, user.password_hash):
+        admin_account = (
+            db.query(models.AdminUser)
+            .filter(
+                models.AdminUser.user_id == user.id,
+                models.AdminUser.is_active.is_(True),
+            )
+            .first()
+        )
+        current_password_hash = admin_account.password_hash if admin_account else user.password_hash
+        if not verify_password(payload.current_password, current_password_hash):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect.")
         if hmac.compare_digest(payload.current_password, payload.new_password):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Choose a new password different from your current password.")
-        user.password_hash = hash_password(payload.new_password)
+        new_password_hash = hash_password(payload.new_password)
+        user.password_hash = new_password_hash
+        if admin_account:
+            admin_account.password_hash = new_password_hash
         db.query(models.UserSession).filter(
             models.UserSession.user_id == user.id,
             models.UserSession.is_active.is_(True),
@@ -2082,6 +2067,8 @@ def create_app() -> FastAPI:
         username = payload.username.strip().lower() if payload.username else None
         if username and db.query(models.User.id).filter(func.lower(models.User.username) == username).first():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That admin username is already in use.")
+        if username and db.query(models.AdminUser.id).filter(func.lower(models.AdminUser.username) == username).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That admin username is already in use.")
         duplicate = (
             db.query(models.User.id)
             .filter(
@@ -2144,6 +2131,17 @@ def create_app() -> FastAPI:
         )
         db.add(user)
         db.flush()
+        if user.role in ADMIN_ROLES:
+            db.add(
+                models.AdminUser(
+                    college_id=user.college_id,
+                    user_id=user.id,
+                    username=username,
+                    password_hash=user.password_hash,
+                    full_name=user.full_name,
+                    is_active=user.is_active,
+                )
+            )
         db.add(
             models.AuditLog(
                 college_id=admin.college_id,
@@ -2182,6 +2180,13 @@ def create_app() -> FastAPI:
                 detail="Use the password-change endpoint to change your own password.",
             )
         employee.password_hash = hash_password(payload.password)
+        admin_account = (
+            db.query(models.AdminUser)
+            .filter(models.AdminUser.user_id == employee.id)
+            .first()
+        )
+        if admin_account is not None:
+            admin_account.password_hash = employee.password_hash
         db.query(models.UserSession).filter(
             models.UserSession.user_id == employee.id,
             models.UserSession.is_active.is_(True),
@@ -3770,7 +3775,7 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/dashboard")
     def admin_dashboard(
-        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
         db: Session = Depends(get_db),
     ):
         today = _attendance_now().date()
