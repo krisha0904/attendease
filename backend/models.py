@@ -189,7 +189,11 @@ class User(Base):
         back_populates="user",
         foreign_keys="BiometricEnrollment.user_id",
     )
-    attendance_records = relationship("AttendanceRecord", back_populates="user")
+    attendance_records = relationship(
+        "AttendanceRecord",
+        back_populates="user",
+        foreign_keys="AttendanceRecord.user_id",
+    )
     leave_applications = relationship(
         "LeaveApplication",
         back_populates="user",
@@ -378,10 +382,17 @@ class AttendanceRecord(Base):
     punch_out_distance_m = Column(Float)
     punch_out_gps_verified = Column(Boolean, default=False)
 
+    # Phase 6: Admin manual override and audit
+    is_manual_override = Column(Boolean, default=False, nullable=False)
+    override_reason = Column(Text, nullable=True)
+    overridden_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    overridden_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
-    user = relationship("User", back_populates="attendance_records")
+    user = relationship("User", back_populates="attendance_records", foreign_keys=[user_id])
+    overridden_by = relationship("User", foreign_keys=[overridden_by_id])
     breaks = relationship("BreakRecord", back_populates="attendance")
     events = relationship("AttendanceEvent", back_populates="attendance")
     location_logs = relationship("LocationVerificationLog", back_populates="attendance")

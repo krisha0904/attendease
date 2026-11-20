@@ -16,6 +16,7 @@ import { AcademicYearPage } from './AcademicYearPage'
 import { LectureTimetablePage } from './LectureTimetablePage'
 import { ClassroomManagementPage } from './ClassroomManagementPage'
 import { HolidayManagementPage } from './HolidayManagementPage'
+import { AttendanceManagementPage } from './AttendanceManagementPage'
 
 interface AdminViewProps {
   page: string
@@ -73,21 +74,7 @@ export function AdminViewDispatcher({
       return <HolidayManagementPage />
 
     case 'attendance':
-      return existingComponents.attendance ? (
-        <AdminPageScaffold
-          title="Attendance Management"
-          eyebrow="REAL-TIME MONITORING"
-          description="Inspect workday punch-ins, lecture punches, face verification results, and GPS geofence checks."
-        >
-          {existingComponents.attendance}
-        </AdminPageScaffold>
-      ) : (
-        <AdminPageScaffold
-          title="Attendance Management"
-          eyebrow="REAL-TIME MONITORING"
-          description="Inspect workday punch-ins, lecture punches, face verification results, and GPS geofence checks."
-        />
-      )
+      return <AttendanceManagementPage />
 
     case 'attendance_corrections':
       return (

@@ -214,6 +214,15 @@ class WeeklyLectureConflictCheck(BaseModel):
     exclude_id: int | None = None
 
 
+class AttendanceManualOverride(BaseModel):
+    user_id: int = Field(gt=0)
+    date: date
+    status: str = Field(pattern="^(present|absent|half_day|on_leave)$")
+    punch_in_time: str | None = None
+    punch_out_time: str | None = None
+    reason: str = Field(min_length=3, max_length=500)
+
+
 class AdditionalLectureCreate(BaseModel):
     lecture_date: date
     subject: str = Field(min_length=1, max_length=200)
@@ -987,21 +996,46 @@ def _working_minutes(started: datetime, ended: datetime) -> int:
 
 
 def _attendance_payload(record: models.AttendanceRecord) -> dict:
-    active_break = next((item for item in record.breaks if item.break_end is None), None)
+    active_break = next((item for item in record.breaks if item.break_end is None), None) if record.breaks else None
+    
+    total_mins = record.net_working_minutes or record.total_working_minutes or 0
+    hrs = total_mins // 60
+    mins = total_mins % 60
+    duration_str = f"{hrs}h {mins}m" if total_mins > 0 else "--"
+
+    overridden_name = None
+    if record.overridden_by:
+        overridden_name = record.overridden_by.full_name
+
     return {
         "id": record.id,
-        "date": record.date,
-        "status": record.status.value,
-        "punch_in_time": record.punch_in_time,
-        "punch_out_time": record.punch_out_time,
+        "date": record.date.isoformat() if hasattr(record.date, "isoformat") else str(record.date),
+        "status": record.status.value if hasattr(record.status, "value") else str(record.status),
+        "punch_in_time": record.punch_in_time.strftime("%H:%M") if record.punch_in_time else None,
+        "punch_out_time": record.punch_out_time.strftime("%H:%M") if record.punch_out_time else None,
+        "punch_in_full": record.punch_in_time.isoformat() if record.punch_in_time else None,
+        "punch_out_full": record.punch_out_time.isoformat() if record.punch_out_time else None,
         "total_working_minutes": record.total_working_minutes or 0,
         "total_break_minutes": record.total_break_minutes or 0,
         "net_working_minutes": record.net_working_minutes or 0,
+        "duration_str": duration_str,
         "is_late": bool(record.is_late),
         "late_by_minutes": record.late_by_minutes or 0,
         "is_early_departure": bool(record.is_early_departure),
         "overtime_minutes": record.overtime_minutes or 0,
-        "active_break_started_at": active_break.break_start if active_break else None,
+        "active_break_started_at": active_break.break_start.isoformat() if active_break and active_break.break_start else None,
+        "is_on_break": active_break is not None,
+        "punch_in_face_verified": bool(record.punch_in_face_verified),
+        "punch_out_face_verified": bool(record.punch_out_face_verified),
+        "punch_in_gps_verified": bool(record.punch_in_gps_verified),
+        "punch_in_distance_m": record.punch_in_distance_m,
+        "punch_out_gps_verified": bool(record.punch_out_gps_verified),
+        "punch_out_distance_m": record.punch_out_distance_m,
+        "is_manual_override": bool(record.is_manual_override),
+        "override_reason": record.override_reason,
+        "overridden_by_id": record.overridden_by_id,
+        "overridden_by_name": overridden_name,
+        "overridden_at": record.overridden_at.isoformat() if record.overridden_at else None,
     }
 
 
@@ -4958,46 +4992,430 @@ def create_app() -> FastAPI:
         db.commit()
         return {"id": request.id, "status": request.status}
 
+    # =========================================================================
+    # PHASE 6: ATTENDANCE MANAGEMENT & MONITORING ENDPOINTS
+    # =========================================================================
+
     @app.get("/admin/attendance")
-    def attendance_report(
+    def list_admin_attendance(
         report_date: date | None = None,
         start_date: date | None = None,
         end_date: date | None = None,
         department_id: int | None = None,
+        faculty_id: int | None = None,
+        status_filter: str = "all",
+        verification_filter: str = "all",
+        search: str | None = None,
         admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
         db: Session = Depends(get_db),
     ):
         today = _attendance_now().date()
-        start = report_date or start_date or today
-        end = report_date or end_date or today
-        if end < start or (end - start).days > 366:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid attendance report range.")
+        target_start = start_date or report_date or today
+        target_end = end_date or report_date or today
+        if target_end < target_start or (target_end - target_start).days > 366:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid date range (max 366 days).")
+
         query = (
             db.query(models.AttendanceRecord, models.User)
             .join(models.User, models.User.id == models.AttendanceRecord.user_id)
             .filter(
                 models.AttendanceRecord.college_id == admin.college_id,
-                models.AttendanceRecord.date >= start,
-                models.AttendanceRecord.date <= end,
+                models.AttendanceRecord.date >= target_start,
+                models.AttendanceRecord.date <= target_end,
             )
         )
         if admin.role == models.UserRole.HOD:
             query = query.filter(models.User.department_id == admin.department_id)
         elif department_id is not None:
             query = query.filter(models.User.department_id == department_id)
-        rows = query.order_by(models.AttendanceRecord.date.desc(), models.User.full_name).limit(5000).all()
-        return [
-            {
-                **_attendance_payload(record),
-                "employee": {
+
+        if faculty_id is not None:
+            query = query.filter(models.User.id == faculty_id)
+
+        if status_filter != "all":
+            try:
+                att_status = models.AttendanceStatus(status_filter)
+                query = query.filter(models.AttendanceRecord.status == att_status)
+            except ValueError:
+                pass
+
+        if verification_filter != "all":
+            if verification_filter == "face_verified":
+                query = query.filter(
+                    or_(
+                        models.AttendanceRecord.punch_in_face_verified.is_(True),
+                        models.AttendanceRecord.punch_out_face_verified.is_(True),
+                    )
+                )
+            elif verification_filter == "gps_verified":
+                query = query.filter(
+                    or_(
+                        models.AttendanceRecord.punch_in_gps_verified.is_(True),
+                        models.AttendanceRecord.punch_out_gps_verified.is_(True),
+                    )
+                )
+            elif verification_filter == "manual_override":
+                query = query.filter(models.AttendanceRecord.is_manual_override.is_(True))
+            elif verification_filter == "unverified":
+                query = query.filter(
+                    models.AttendanceRecord.punch_in_face_verified.is_(False),
+                    models.AttendanceRecord.is_manual_override.is_(False),
+                )
+
+        if search and search.strip():
+            term = f"%{search.strip().lower()}%"
+            query = query.filter(
+                or_(
+                    func.lower(models.User.full_name).like(term),
+                    func.lower(models.User.employee_id).like(term),
+                    func.lower(models.User.email).like(term),
+                )
+            )
+
+        rows = query.order_by(models.AttendanceRecord.date.desc(), models.AttendanceRecord.punch_in_time.desc()).limit(1000).all()
+
+        items = []
+        for record, employee in rows:
+            rec_dict = _attendance_payload(record)
+            weekday_idx = record.date.weekday()
+
+            # Scheduled lectures count for this user on this weekday
+            sched_lectures = db.query(models.WeeklyLecture).filter(
+                models.WeeklyLecture.college_id == admin.college_id,
+                models.WeeklyLecture.user_id == employee.id,
+                models.WeeklyLecture.day_of_week == weekday_idx,
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.status != "cancelled",
+            ).all()
+
+            # Attended lectures count for this user on this date
+            attended_lectures = db.query(models.LectureAttendanceRecord).filter(
+                models.LectureAttendanceRecord.college_id == admin.college_id,
+                models.LectureAttendanceRecord.user_id == employee.id,
+                models.LectureAttendanceRecord.lecture_date == record.date,
+                models.LectureAttendanceRecord.punch_in_time.isnot(None),
+            ).all()
+
+            dept_name = employee.department.name if employee.department else None
+
+            items.append({
+                **rec_dict,
+                "faculty": {
                     "id": employee.id,
                     "employee_id": employee.employee_id,
                     "full_name": employee.full_name,
+                    "email": employee.email,
+                    "phone": employee.phone,
                     "department_id": employee.department_id,
+                    "department_name": dept_name,
+                    "face_enrollment_status": employee.face_enrollment_status.value if hasattr(employee.face_enrollment_status, "value") else str(employee.face_enrollment_status),
                 },
+                "lectures_summary": {
+                    "scheduled_count": len(sched_lectures),
+                    "attended_count": len(attended_lectures),
+                    "completed_all": len(sched_lectures) > 0 and len(attended_lectures) >= len(sched_lectures),
+                },
+            })
+
+        # Summary KPIs for the selected range/date
+        total_faculty_q = db.query(models.User).filter(
+            models.User.college_id == admin.college_id,
+            models.User.role == models.UserRole.FACULTY,
+            models.User.is_active.is_(True),
+        )
+        if admin.role == models.UserRole.HOD:
+            total_faculty_q = total_faculty_q.filter(models.User.department_id == admin.department_id)
+        total_faculty_count = total_faculty_q.count()
+
+        present_cnt = sum(1 for item in items if item["status"] in ("present", "punched_out"))
+        late_cnt = sum(1 for item in items if item["is_late"])
+        half_day_cnt = sum(1 for item in items if item["status"] == "half_day")
+        on_break_cnt = sum(1 for item in items if item["is_on_break"])
+        on_campus_cnt = sum(1 for item in items if item["punch_in_time"] and not item["punch_out_time"])
+
+        face_verified_cnt = sum(1 for item in items if item["punch_in_face_verified"])
+        face_rate = round((face_verified_cnt / max(1, len(items))) * 100, 1)
+
+        summary = {
+            "total_faculty": total_faculty_count,
+            "recorded_today": len(items),
+            "present_count": present_cnt,
+            "absent_count": max(0, total_faculty_count - present_cnt - half_day_cnt),
+            "late_count": late_cnt,
+            "half_day_count": half_day_cnt,
+            "currently_on_campus": on_campus_cnt,
+            "on_break_count": on_break_cnt,
+            "biometric_pass_rate": face_rate,
+        }
+
+        return {
+            "items": items,
+            "summary": summary,
+            "total_records": len(items),
+        }
+
+    @app.get("/admin/attendance/{record_id}/details")
+    def get_attendance_record_details(
+        record_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        record = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.id == record_id,
+            models.AttendanceRecord.college_id == admin.college_id,
+        ).first()
+        if not record:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attendance record not found.")
+
+        faculty = record.user
+        if admin.role == models.UserRole.HOD and faculty.department_id != admin.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+        # Scheduled Lectures for this faculty on this date's weekday
+        weekday_idx = record.date.weekday()
+        sched_lectures = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.user_id == faculty.id,
+            models.WeeklyLecture.day_of_week == weekday_idx,
+            models.WeeklyLecture.is_active.is_(True),
+        ).all()
+
+        lecture_records = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.college_id == admin.college_id,
+            models.LectureAttendanceRecord.user_id == faculty.id,
+            models.LectureAttendanceRecord.lecture_date == record.date,
+        ).all()
+
+        lec_record_map = {lr.weekly_lecture_id: lr for lr in lecture_records if lr.weekly_lecture_id}
+
+        lectures_breakdown = []
+        for sl in sched_lectures:
+            att = lec_record_map.get(sl.id)
+            lectures_breakdown.append({
+                "lecture_id": sl.id,
+                "subject": sl.subject,
+                "course_name": sl.course_name,
+                "room": sl.room,
+                "lecture_type": sl.lecture_type or "Theory",
+                "start_time": sl.start_time.strftime("%H:%M") if hasattr(sl.start_time, "strftime") else str(sl.start_time)[:5],
+                "end_time": sl.end_time.strftime("%H:%M") if hasattr(sl.end_time, "strftime") else str(sl.end_time)[:5],
+                "status": sl.status,
+                "attended": att is not None and att.punch_in_time is not None,
+                "punch_in": att.punch_in_time.strftime("%H:%M") if att and att.punch_in_time else None,
+                "punch_out": att.punch_out_time.strftime("%H:%M") if att and att.punch_out_time else None,
+                "face_verified": bool(att.punch_in_face_verified) if att else False,
+            })
+
+        # Event timeline
+        events_list = [
+            {
+                "id": ev.id,
+                "event_type": ev.event_type,
+                "event_time": ev.event_time.isoformat() if ev.event_time else None,
+                "face_verified": ev.face_verified,
+                "gps_verified": ev.gps_verified,
+                "distance_m": ev.distance_m,
+                "ip_address": ev.ip_address,
             }
-            for record, employee in rows
+            for ev in (record.events or [])
         ]
+
+        # Breaks
+        breaks_list = [
+            {
+                "id": br.id,
+                "break_start": br.break_start.isoformat() if br.break_start else None,
+                "break_end": br.break_end.isoformat() if br.break_end else None,
+                "duration_minutes": br.duration_minutes,
+            }
+            for br in (record.breaks or [])
+        ]
+
+        return {
+            "record": _attendance_payload(record),
+            "faculty": {
+                "id": faculty.id,
+                "employee_id": faculty.employee_id,
+                "full_name": faculty.full_name,
+                "email": faculty.email,
+                "phone": faculty.phone,
+                "designation": faculty.designation,
+                "department": faculty.department.name if faculty.department else None,
+                "face_enrollment_status": faculty.face_enrollment_status.value if hasattr(faculty.face_enrollment_status, "value") else str(faculty.face_enrollment_status),
+            },
+            "lectures_breakdown": lectures_breakdown,
+            "timeline": sorted(events_list, key=lambda x: x["event_time"] or ""),
+            "breaks": breaks_list,
+        }
+
+    @app.post("/admin/attendance/manual-override")
+    def manual_attendance_override(
+        payload: AttendanceManualOverride,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        faculty = db.query(models.User).filter(
+            models.User.id == payload.user_id,
+            models.User.college_id == admin.college_id,
+            models.User.is_active.is_(True),
+        ).first()
+        if not faculty:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Faculty member not found.")
+
+        if admin.role == models.UserRole.HOD and faculty.department_id != admin.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only override attendance for your own department.")
+
+        record = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.user_id == faculty.id,
+            models.AttendanceRecord.college_id == admin.college_id,
+            models.AttendanceRecord.date == payload.date,
+        ).first()
+
+        now = _attendance_now()
+
+        # Parse punch times if supplied
+        p_in_dt = None
+        if payload.punch_in_time:
+            try:
+                parts = payload.punch_in_time.split(":")
+                p_in_dt = datetime.combine(payload.date, time(int(parts[0]), int(parts[1])))
+            except Exception:
+                p_in_dt = now
+
+        p_out_dt = None
+        if payload.punch_out_time:
+            try:
+                parts = payload.punch_out_time.split(":")
+                p_out_dt = datetime.combine(payload.date, time(int(parts[0]), int(parts[1])))
+            except Exception:
+                p_out_dt = now
+
+        status_enum = models.AttendanceStatus(payload.status)
+
+        if not record:
+            record = models.AttendanceRecord(
+                college_id=admin.college_id,
+                user_id=faculty.id,
+                date=payload.date,
+                status=status_enum,
+                punch_in_time=p_in_dt,
+                punch_out_time=p_out_dt,
+                is_manual_override=True,
+                override_reason=payload.reason.strip(),
+                overridden_by_id=admin.id,
+                overridden_at=now,
+            )
+            db.add(record)
+            db.flush()
+        else:
+            record.status = status_enum
+            if p_in_dt:
+                record.punch_in_time = p_in_dt
+            if p_out_dt:
+                record.punch_out_time = p_out_dt
+            record.is_manual_override = True
+            record.override_reason = payload.reason.strip()
+            record.overridden_by_id = admin.id
+            record.overridden_at = now
+
+        # Compute net working minutes if times available
+        if record.punch_in_time and record.punch_out_time:
+            record.total_working_minutes = _working_minutes(record.punch_in_time, record.punch_out_time)
+            record.net_working_minutes = max(0, record.total_working_minutes - (record.total_break_minutes or 0))
+
+        # Log audit event
+        import uuid
+        event = models.AttendanceEvent(
+            attendance_id=record.id,
+            user_id=faculty.id,
+            event_type=f"admin_override_{payload.status}",
+            event_time=now,
+            idempotency_key=str(uuid.uuid4()),
+            ip_address="admin_console",
+        )
+        db.add(event)
+        db.commit()
+        db.refresh(record)
+
+        return {
+            "message": f"Attendance successfully updated to {payload.status} for {faculty.full_name}.",
+            "record": _attendance_payload(record),
+        }
+
+    @app.get("/admin/attendance/export")
+    def export_attendance_csv(
+        report_date: date | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        department_id: int | None = None,
+        status_filter: str = "all",
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        import csv
+        from io import StringIO
+        from fastapi.responses import Response
+
+        today = _attendance_now().date()
+        target_start = start_date or report_date or today
+        target_end = end_date or report_date or today
+
+        query = (
+            db.query(models.AttendanceRecord, models.User)
+            .join(models.User, models.User.id == models.AttendanceRecord.user_id)
+            .filter(
+                models.AttendanceRecord.college_id == admin.college_id,
+                models.AttendanceRecord.date >= target_start,
+                models.AttendanceRecord.date <= target_end,
+            )
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == admin.department_id)
+        elif department_id is not None:
+            query = query.filter(models.User.department_id == department_id)
+
+        if status_filter != "all":
+            try:
+                att_status = models.AttendanceStatus(status_filter)
+                query = query.filter(models.AttendanceRecord.status == att_status)
+            except ValueError:
+                pass
+
+        rows = query.order_by(models.AttendanceRecord.date.desc(), models.User.full_name).all()
+
+        output = StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Date", "Faculty ID", "Faculty Name", "Department", "Status",
+            "Punch In", "Punch Out", "Total Minutes", "Late Minutes",
+            "Face Verified", "GPS Verified", "Manual Override", "Override Reason",
+        ])
+
+        for rec, u in rows:
+            p_in = rec.punch_in_time.strftime("%H:%M") if rec.punch_in_time else ""
+            p_out = rec.punch_out_time.strftime("%H:%M") if rec.punch_out_time else ""
+            dept_name = u.department.name if u.department else ""
+            writer.writerow([
+                rec.date.isoformat(),
+                u.employee_id,
+                u.full_name,
+                dept_name,
+                rec.status.value if hasattr(rec.status, "value") else str(rec.status),
+                p_in,
+                p_out,
+                rec.net_working_minutes or rec.total_working_minutes or 0,
+                rec.late_by_minutes or 0,
+                "YES" if rec.punch_in_face_verified else "NO",
+                "YES" if rec.punch_in_gps_verified else "NO",
+                "YES" if rec.is_manual_override else "NO",
+                rec.override_reason or "",
+            ])
+
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=attendance_{target_start}_{target_end}.csv"},
+        )
 
     # =========================================================================
     # PHASE 2: VISITING FACULTY MANAGEMENT ENDPOINTS
