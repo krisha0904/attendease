@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react'
 import {
-  AlertCircle, BookOpen, Check, CheckCircle2, ChevronRight,
-  Clock, Edit3, Eye, FileText, GraduationCap, Layers, Plus, Power,
-  RefreshCw, Search, Trash2, UserMinus, UserPlus, Users, X
+  AlertCircle, BookOpen, CheckCircle2,
+  Clock, Edit3, FileText, GraduationCap, Layers, Plus, Power,
+  RefreshCw, Search, Trash2, UserPlus, X
 } from 'lucide-react'
 import { api, errorMessage, fetchJson } from './api'
 

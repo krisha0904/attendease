@@ -154,18 +154,64 @@ class TaskUpdate(BaseModel):
 class WeeklyLectureCreate(BaseModel):
     user_id: int = Field(gt=0)
     department_id: int | None = Field(default=None, gt=0)
-    subject: str = Field(min_length=1, max_length=200)
+    subject: str | None = Field(default=None, max_length=200)
+    subject_id: int | None = Field(default=None, gt=0)
     course_name: str | None = Field(default=None, max_length=200)
+    course_id: int | None = Field(default=None, gt=0)
+    academic_year_id: int | None = Field(default=None, gt=0)
+    classroom_id: int | None = Field(default=None, gt=0)
+    semester: int | None = Field(default=None, ge=1, le=12)
+    lecture_type: str = Field(default="Theory", max_length=30)
     day_of_week: int = Field(ge=0, le=6)
     start_time: time_type
     end_time: time_type
     room: str | None = Field(default=None, max_length=100)
+    substitute_faculty_id: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def valid_times(self):
         if self.end_time <= self.start_time:
             raise ValueError("Lecture end time must be after its start time.")
+        if not self.subject and not self.subject_id:
+            raise ValueError("Subject name or subject ID must be provided.")
         return self
+
+
+class WeeklyLectureUpdate(BaseModel):
+    user_id: int | None = Field(default=None, gt=0)
+    department_id: int | None = Field(default=None, gt=0)
+    subject: str | None = Field(default=None, max_length=200)
+    subject_id: int | None = Field(default=None, gt=0)
+    course_name: str | None = Field(default=None, max_length=200)
+    course_id: int | None = Field(default=None, gt=0)
+    academic_year_id: int | None = Field(default=None, gt=0)
+    classroom_id: int | None = Field(default=None, gt=0)
+    semester: int | None = Field(default=None, ge=1, le=12)
+    lecture_type: str | None = Field(default=None, max_length=30)
+    day_of_week: int | None = Field(default=None, ge=0, le=6)
+    start_time: time_type | None = None
+    end_time: time_type | None = None
+    room: str | None = Field(default=None, max_length=100)
+    substitute_faculty_id: int | None = Field(default=None, gt=0)
+
+
+class WeeklyLectureStatusUpdate(BaseModel):
+    status: str = Field(pattern="^(scheduled|in_progress|completed|cancelled|rescheduled)$")
+    cancellation_reason: str | None = None
+
+
+class WeeklyLectureSubstituteUpdate(BaseModel):
+    substitute_faculty_id: int | None = None
+
+
+class WeeklyLectureConflictCheck(BaseModel):
+    user_id: int = Field(gt=0)
+    classroom_id: int | None = None
+    room: str | None = None
+    day_of_week: int = Field(ge=0, le=6)
+    start_time: time_type
+    end_time: time_type
+    exclude_id: int | None = None
 
 
 class AdditionalLectureCreate(BaseModel):
@@ -959,21 +1005,75 @@ def _attendance_payload(record: models.AttendanceRecord) -> dict:
     }
 
 
+WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
 def _weekly_lecture_payload(lecture: models.WeeklyLecture) -> dict:
+    sub_name = None
+    sub_emp_id = None
+    if lecture.substitute_faculty:
+        sub_name = lecture.substitute_faculty.full_name
+        sub_emp_id = lecture.substitute_faculty.employee_id
+
+    room_display = lecture.room
+    building = None
+    floor = None
+    if lecture.classroom:
+        room_display = f"{lecture.classroom.building} - {lecture.classroom.room_number}" if lecture.classroom.building else lecture.classroom.room_number
+        building = lecture.classroom.building
+        floor = lecture.classroom.floor
+
+    course_display = lecture.course_name
+    course_code = None
+    if lecture.course_rel:
+        course_display = lecture.course_rel.name
+        course_code = lecture.course_rel.code
+
+    subject_display = lecture.subject
+    subject_code = None
+    if lecture.subject_rel:
+        subject_display = lecture.subject_rel.name
+        subject_code = lecture.subject_rel.code
+
+    day_idx = lecture.day_of_week
+    day_name = WEEKDAY_NAMES[day_idx] if 0 <= day_idx < len(WEEKDAY_NAMES) else f"Day {day_idx}"
+
     return {
         "id": lecture.id,
         "user_id": lecture.user_id,
-        "user_name": lecture.user.full_name,
-        "employee_id": lecture.user.employee_id,
+        "faculty_name": lecture.user.full_name if lecture.user else "Unknown Faculty",
+        "employee_id": lecture.user.employee_id if lecture.user else "",
+        "faculty_email": lecture.user.email if lecture.user else "",
         "department_id": lecture.department_id,
-        "department": lecture.department.name if lecture.department else None,
-        "subject": lecture.subject,
-        "course_name": lecture.course_name,
+        "department_name": lecture.department.name if lecture.department else None,
+        "subject_id": lecture.subject_id,
+        "subject": subject_display,
+        "subject_code": subject_code,
+        "course_id": lecture.course_id,
+        "course_name": course_display,
+        "course_code": course_code,
+        "academic_year_id": lecture.academic_year_id,
+        "academic_year_name": lecture.academic_year.name if lecture.academic_year else None,
+        "classroom_id": lecture.classroom_id,
+        "room": room_display,
+        "room_number": lecture.classroom.room_number if lecture.classroom else (lecture.room or "TBA"),
+        "building": building,
+        "floor": floor,
+        "semester": lecture.semester,
+        "lecture_type": lecture.lecture_type or "Theory",
         "day_of_week": lecture.day_of_week,
-        "start_time": lecture.start_time.strftime("%H:%M"),
-        "end_time": lecture.end_time.strftime("%H:%M"),
-        "room": lecture.room,
+        "day_name": day_name,
+        "start_time": lecture.start_time.strftime("%H:%M") if hasattr(lecture.start_time, "strftime") else str(lecture.start_time)[:5],
+        "end_time": lecture.end_time.strftime("%H:%M") if hasattr(lecture.end_time, "strftime") else str(lecture.end_time)[:5],
+        "status": lecture.status or "scheduled",
+        "cancellation_reason": lecture.cancellation_reason,
+        "substitute_faculty_id": lecture.substitute_faculty_id,
+        "substitute_faculty_name": sub_name,
+        "substitute_employee_id": sub_emp_id,
         "is_active": lecture.is_active,
+        "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+        # backward compatibility keys:
+        "user_name": lecture.user.full_name if lecture.user else "Unknown",
+        "department": lecture.department.name if lecture.department else None,
     }
 
 
@@ -4144,6 +4244,15 @@ def create_app() -> FastAPI:
 
     @app.get("/admin/timetable")
     def list_timetable(
+        department_id: int | None = None,
+        course_id: int | None = None,
+        semester: int | None = None,
+        faculty_id: int | None = None,
+        classroom_id: int | None = None,
+        day_of_week: int | None = None,
+        status_filter: str = "all",
+        academic_year_id: int | None = None,
+        search: str | None = None,
         admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
         db: Session = Depends(get_db),
     ):
@@ -4153,12 +4262,182 @@ def create_app() -> FastAPI:
         )
         if admin.role == models.UserRole.HOD:
             query = query.filter(models.WeeklyLecture.department_id == admin.department_id)
+        elif department_id is not None:
+            query = query.filter(models.WeeklyLecture.department_id == department_id)
+
+        if course_id is not None:
+            query = query.filter(models.WeeklyLecture.course_id == course_id)
+        if semester is not None:
+            query = query.filter(models.WeeklyLecture.semester == semester)
+        if faculty_id is not None:
+            query = query.filter(
+                or_(
+                    models.WeeklyLecture.user_id == faculty_id,
+                    models.WeeklyLecture.substitute_faculty_id == faculty_id,
+                )
+            )
+        if classroom_id is not None:
+            query = query.filter(models.WeeklyLecture.classroom_id == classroom_id)
+        if day_of_week is not None:
+            query = query.filter(models.WeeklyLecture.day_of_week == day_of_week)
+        if status_filter != "all":
+            query = query.filter(models.WeeklyLecture.status == status_filter)
+        if academic_year_id is not None:
+            query = query.filter(models.WeeklyLecture.academic_year_id == academic_year_id)
+        if search and search.strip():
+            term = f"%{search.strip()}%"
+            query = query.filter(
+                or_(
+                    models.WeeklyLecture.subject.ilike(term),
+                    models.WeeklyLecture.course_name.ilike(term),
+                    models.WeeklyLecture.room.ilike(term),
+                    models.WeeklyLecture.user.has(models.User.full_name.ilike(term)),
+                )
+            )
+
         lectures = query.order_by(
             models.WeeklyLecture.day_of_week,
             models.WeeklyLecture.start_time,
             models.WeeklyLecture.user_id,
         ).all()
-        return [_weekly_lecture_payload(item) for item in lectures]
+
+        # Compute summary KPIs
+        all_active_query = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        )
+        if admin.role == models.UserRole.HOD:
+            all_active_query = all_active_query.filter(models.WeeklyLecture.department_id == admin.department_id)
+        all_lectures = all_active_query.all()
+
+        today_weekday = _attendance_now().weekday()
+        today_lectures = sum(1 for l in all_lectures if l.day_of_week == today_weekday and l.status != "cancelled")
+        distinct_faculty = len({l.user_id for l in all_lectures if l.user_id})
+        distinct_classrooms = len({l.classroom_id for l in all_lectures if l.classroom_id} | {l.room for l in all_lectures if l.room})
+        substitute_count = sum(1 for l in all_lectures if l.substitute_faculty_id is not None)
+        cancelled_count = sum(1 for l in all_lectures if l.status == "cancelled")
+
+        return {
+            "items": [_weekly_lecture_payload(item) for item in lectures],
+            "summary": {
+                "total_lectures": len(all_lectures),
+                "today_lectures": today_lectures,
+                "assigned_faculty_count": distinct_faculty,
+                "classrooms_allocated": distinct_classrooms,
+                "substitute_count": substitute_count,
+                "cancelled_count": cancelled_count,
+            },
+        }
+
+    @app.get("/admin/timetable/matrix")
+    def get_timetable_matrix(
+        department_id: int | None = None,
+        academic_year_id: int | None = None,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.WeeklyLecture.department_id == admin.department_id)
+        elif department_id is not None:
+            query = query.filter(models.WeeklyLecture.department_id == department_id)
+        if academic_year_id is not None:
+            query = query.filter(models.WeeklyLecture.academic_year_id == academic_year_id)
+
+        lectures = query.order_by(
+            models.WeeklyLecture.day_of_week,
+            models.WeeklyLecture.start_time,
+        ).all()
+
+        days = {i: [] for i in range(7)}
+        for item in lectures:
+            days[item.day_of_week].append(_weekly_lecture_payload(item))
+
+        return {
+            "matrix": [
+                {
+                    "day_index": i,
+                    "day_name": WEEKDAY_NAMES[i],
+                    "lectures": days[i],
+                    "total_sessions": len(days[i]),
+                }
+                for i in range(7)
+            ]
+        }
+
+    @app.post("/admin/timetable/check-conflict")
+    def check_timetable_conflict(
+        payload: WeeklyLectureConflictCheck,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        # 1. Check faculty conflict
+        faculty_coll_query = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+            models.WeeklyLecture.status != "cancelled",
+            models.WeeklyLecture.day_of_week == payload.day_of_week,
+            models.WeeklyLecture.start_time < payload.end_time,
+            models.WeeklyLecture.end_time > payload.start_time,
+            or_(
+                models.WeeklyLecture.user_id == payload.user_id,
+                models.WeeklyLecture.substitute_faculty_id == payload.user_id,
+            ),
+        )
+        if payload.exclude_id:
+            faculty_coll_query = faculty_coll_query.filter(models.WeeklyLecture.id != payload.exclude_id)
+        fac_coll = faculty_coll_query.first()
+        if fac_coll:
+            fac_user = db.query(models.User).filter(models.User.id == payload.user_id).first()
+            f_name = fac_user.full_name if fac_user else "Faculty member"
+            day_str = WEEKDAY_NAMES[payload.day_of_week] if 0 <= payload.day_of_week < len(WEEKDAY_NAMES) else f"Day {payload.day_of_week}"
+            st_str = fac_coll.start_time.strftime("%H:%M") if hasattr(fac_coll.start_time, "strftime") else str(fac_coll.start_time)[:5]
+            et_str = fac_coll.end_time.strftime("%H:%M") if hasattr(fac_coll.end_time, "strftime") else str(fac_coll.end_time)[:5]
+            return {
+                "has_conflict": True,
+                "conflict_type": "faculty",
+                "conflict_message": f"Faculty Conflict: {f_name} is already assigned to '{fac_coll.subject}' in {fac_coll.room or 'room'} from {st_str} to {et_str} on {day_str}.",
+            }
+
+        # 2. Check classroom conflict
+        if payload.classroom_id or (payload.room and payload.room.strip()):
+            room_conds = []
+            if payload.classroom_id:
+                room_conds.append(models.WeeklyLecture.classroom_id == payload.classroom_id)
+            if payload.room and payload.room.strip():
+                room_conds.append(models.WeeklyLecture.room == payload.room.strip())
+            room_coll_query = db.query(models.WeeklyLecture).filter(
+                models.WeeklyLecture.college_id == admin.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.status != "cancelled",
+                models.WeeklyLecture.day_of_week == payload.day_of_week,
+                models.WeeklyLecture.start_time < payload.end_time,
+                models.WeeklyLecture.end_time > payload.start_time,
+                or_(*room_conds),
+            )
+            if payload.exclude_id:
+                room_coll_query = room_coll_query.filter(models.WeeklyLecture.id != payload.exclude_id)
+            room_coll = room_coll_query.first()
+            if room_coll:
+                r_name = room_coll.room or f"Classroom #{payload.classroom_id}"
+                day_str = WEEKDAY_NAMES[payload.day_of_week] if 0 <= payload.day_of_week < len(WEEKDAY_NAMES) else f"Day {payload.day_of_week}"
+                st_str = room_coll.start_time.strftime("%H:%M") if hasattr(room_coll.start_time, "strftime") else str(room_coll.start_time)[:5]
+                et_str = room_coll.end_time.strftime("%H:%M") if hasattr(room_coll.end_time, "strftime") else str(room_coll.end_time)[:5]
+                t_name = room_coll.user.full_name if room_coll.user else "another faculty"
+                return {
+                    "has_conflict": True,
+                    "conflict_type": "classroom",
+                    "conflict_message": f"Classroom Conflict: {r_name} is already occupied by {t_name} for '{room_coll.subject}' from {st_str} to {et_str} on {day_str}.",
+                }
+
+        return {
+            "has_conflict": False,
+            "conflict_type": None,
+            "conflict_message": None,
+        }
 
     @app.post("/admin/timetable", status_code=status.HTTP_201_CREATED)
     def create_timetable_entry(
@@ -4170,47 +4449,333 @@ def create_app() -> FastAPI:
             models.User.id == payload.user_id,
             models.User.college_id == admin.college_id,
             models.User.is_active.is_(True),
-            models.User.role.in_((models.UserRole.FACULTY, models.UserRole.STAFF)),
         ).first()
         if teacher is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active faculty or staff member not found.")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active faculty member not found.")
         if admin.role == models.UserRole.HOD and teacher.department_id != admin.department_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only schedule your own department.")
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only schedule lectures for your own department.")
+
         department_id = payload.department_id if payload.department_id is not None else teacher.department_id
-        if department_id is not None:
-            department = db.query(models.Department).filter(
-                models.Department.id == department_id,
-                models.Department.college_id == admin.college_id,
-                models.Department.is_active.is_(True),
+
+        # Subject mapping & autofill
+        subject_title = payload.subject.strip() if payload.subject else None
+        if payload.subject_id:
+            sub = db.query(models.Subject).filter(
+                models.Subject.id == payload.subject_id,
+                models.Subject.college_id == admin.college_id,
             ).first()
-            if department is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found.")
-            if teacher.department_id != department_id:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The teacher must belong to the selected department.")
-        collision = db.query(models.WeeklyLecture.id).filter(
-            models.WeeklyLecture.user_id == teacher.id,
+            if sub:
+                if not subject_title:
+                    subject_title = sub.name
+                if sub.department_id and not department_id:
+                    department_id = sub.department_id
+                if sub.course_id and not payload.course_id:
+                    payload.course_id = sub.course_id
+                if sub.semester and not payload.semester:
+                    payload.semester = sub.semester
+
+        if not subject_title:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Subject title or valid subject ID is required.")
+
+        # Course mapping & autofill
+        course_name_val = payload.course_name.strip() if payload.course_name else None
+        if payload.course_id:
+            course_obj = db.query(models.Course).filter(
+                models.Course.id == payload.course_id,
+                models.Course.college_id == admin.college_id,
+            ).first()
+            if course_obj and not course_name_val:
+                course_name_val = f"{course_obj.name} ({course_obj.code})"
+
+        # Classroom mapping & room string autofill
+        room_val = payload.room.strip() if payload.room else None
+        if payload.classroom_id:
+            room_obj = db.query(models.Classroom).filter(
+                models.Classroom.id == payload.classroom_id,
+                models.Classroom.college_id == admin.college_id,
+            ).first()
+            if room_obj:
+                room_val = f"{room_obj.building} - {room_obj.room_number}" if room_obj.building else room_obj.room_number
+
+        # 1. Conflict Check: Faculty overlap
+        fac_collision = db.query(models.WeeklyLecture).filter(
             models.WeeklyLecture.college_id == admin.college_id,
-            models.WeeklyLecture.day_of_week == payload.day_of_week,
             models.WeeklyLecture.is_active.is_(True),
+            models.WeeklyLecture.status != "cancelled",
+            models.WeeklyLecture.day_of_week == payload.day_of_week,
             models.WeeklyLecture.start_time < payload.end_time,
             models.WeeklyLecture.end_time > payload.start_time,
+            or_(
+                models.WeeklyLecture.user_id == teacher.id,
+                models.WeeklyLecture.substitute_faculty_id == teacher.id,
+            ),
         ).first()
-        if collision:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This schedule overlaps another lecture for the selected faculty member.")
+        if fac_collision:
+            day_str = WEEKDAY_NAMES[payload.day_of_week] if 0 <= payload.day_of_week < len(WEEKDAY_NAMES) else f"Day {payload.day_of_week}"
+            st_str = fac_collision.start_time.strftime("%H:%M") if hasattr(fac_collision.start_time, "strftime") else str(fac_collision.start_time)[:5]
+            et_str = fac_collision.end_time.strftime("%H:%M") if hasattr(fac_collision.end_time, "strftime") else str(fac_collision.end_time)[:5]
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Faculty Conflict: {teacher.full_name} is already scheduled for '{fac_collision.subject}' in {fac_collision.room or 'assigned room'} from {st_str} to {et_str} on {day_str}.",
+            )
+
+        # 2. Conflict Check: Classroom overlap
+        if payload.classroom_id or room_val:
+            room_conds = []
+            if payload.classroom_id:
+                room_conds.append(models.WeeklyLecture.classroom_id == payload.classroom_id)
+            if room_val:
+                room_conds.append(models.WeeklyLecture.room == room_val)
+            room_collision = db.query(models.WeeklyLecture).filter(
+                models.WeeklyLecture.college_id == admin.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.status != "cancelled",
+                models.WeeklyLecture.day_of_week == payload.day_of_week,
+                models.WeeklyLecture.start_time < payload.end_time,
+                models.WeeklyLecture.end_time > payload.start_time,
+                or_(*room_conds),
+            ).first()
+            if room_collision:
+                day_str = WEEKDAY_NAMES[payload.day_of_week] if 0 <= payload.day_of_week < len(WEEKDAY_NAMES) else f"Day {payload.day_of_week}"
+                st_str = room_collision.start_time.strftime("%H:%M") if hasattr(room_collision.start_time, "strftime") else str(room_collision.start_time)[:5]
+                et_str = room_collision.end_time.strftime("%H:%M") if hasattr(room_collision.end_time, "strftime") else str(room_collision.end_time)[:5]
+                occ_name = room_collision.user.full_name if room_collision.user else "another faculty"
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Classroom Conflict: Room '{room_val or room_collision.room}' is already allocated to {occ_name} for '{room_collision.subject}' from {st_str} to {et_str} on {day_str}.",
+                )
+
+        # 3. Check Substitute Faculty conflict (if provided)
+        if payload.substitute_faculty_id:
+            sub_fac = db.query(models.User).filter(
+                models.User.id == payload.substitute_faculty_id,
+                models.User.college_id == admin.college_id,
+                models.User.is_active.is_(True),
+            ).first()
+            if not sub_fac:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Substitute faculty member not found.")
+
         lecture = models.WeeklyLecture(
             college_id=admin.college_id,
             department_id=department_id,
             user_id=teacher.id,
-            subject=payload.subject.strip(),
-            course_name=payload.course_name.strip() if payload.course_name else None,
+            subject=subject_title,
+            course_name=course_name_val,
             day_of_week=payload.day_of_week,
             start_time=payload.start_time,
             end_time=payload.end_time,
-            room=payload.room.strip() if payload.room else None,
+            room=room_val,
             is_active=True,
             created_by=admin.id,
+            subject_id=payload.subject_id,
+            course_id=payload.course_id,
+            academic_year_id=payload.academic_year_id,
+            classroom_id=payload.classroom_id,
+            semester=payload.semester,
+            lecture_type=payload.lecture_type or "Theory",
+            substitute_faculty_id=payload.substitute_faculty_id,
+            status="scheduled",
         )
         db.add(lecture)
+        db.commit()
+        db.refresh(lecture)
+        return _weekly_lecture_payload(lecture)
+
+    @app.put("/admin/timetable/{lecture_id}")
+    def update_timetable_entry(
+        lecture_id: int,
+        payload: WeeklyLectureUpdate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        lecture = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.id == lecture_id,
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        ).first()
+        if lecture is None or (admin.role == models.UserRole.HOD and lecture.department_id != admin.department_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Timetable entry not found.")
+
+        target_user_id = payload.user_id if payload.user_id is not None else lecture.user_id
+        target_day = payload.day_of_week if payload.day_of_week is not None else lecture.day_of_week
+        target_start = payload.start_time if payload.start_time is not None else lecture.start_time
+        target_end = payload.end_time if payload.end_time is not None else lecture.end_time
+        if target_end <= target_start:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Lecture end time must be after start time.")
+
+        target_classroom_id = payload.classroom_id if payload.classroom_id is not None else lecture.classroom_id
+        target_room = payload.room if payload.room is not None else lecture.room
+
+        if payload.classroom_id:
+            rm_obj = db.query(models.Classroom).filter(
+                models.Classroom.id == payload.classroom_id,
+                models.Classroom.college_id == admin.college_id,
+            ).first()
+            if rm_obj:
+                target_room = f"{rm_obj.building} - {rm_obj.room_number}" if rm_obj.building else rm_obj.room_number
+
+        # 1. Faculty conflict check (exclude this lecture)
+        fac_coll = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.id != lecture.id,
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+            models.WeeklyLecture.status != "cancelled",
+            models.WeeklyLecture.day_of_week == target_day,
+            models.WeeklyLecture.start_time < target_end,
+            models.WeeklyLecture.end_time > target_start,
+            or_(
+                models.WeeklyLecture.user_id == target_user_id,
+                models.WeeklyLecture.substitute_faculty_id == target_user_id,
+            ),
+        ).first()
+        if fac_coll:
+            t_user = db.query(models.User).filter(models.User.id == target_user_id).first()
+            t_name = t_user.full_name if t_user else "Faculty member"
+            day_str = WEEKDAY_NAMES[target_day] if 0 <= target_day < len(WEEKDAY_NAMES) else f"Day {target_day}"
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Faculty Conflict: {t_name} is already scheduled for '{fac_coll.subject}' in {fac_coll.room or 'room'} on {day_str}.",
+            )
+
+        # 2. Classroom conflict check (exclude this lecture)
+        if target_classroom_id or target_room:
+            room_conds = []
+            if target_classroom_id:
+                room_conds.append(models.WeeklyLecture.classroom_id == target_classroom_id)
+            if target_room:
+                room_conds.append(models.WeeklyLecture.room == target_room)
+            room_coll = db.query(models.WeeklyLecture).filter(
+                models.WeeklyLecture.id != lecture.id,
+                models.WeeklyLecture.college_id == admin.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.status != "cancelled",
+                models.WeeklyLecture.day_of_week == target_day,
+                models.WeeklyLecture.start_time < target_end,
+                models.WeeklyLecture.end_time > target_start,
+                or_(*room_conds),
+            ).first()
+            if room_coll:
+                day_str = WEEKDAY_NAMES[target_day] if 0 <= target_day < len(WEEKDAY_NAMES) else f"Day {target_day}"
+                occ_name = room_coll.user.full_name if room_coll.user else "another faculty"
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Classroom Conflict: Room '{target_room or room_coll.room}' is already booked by {occ_name} on {day_str}.",
+                )
+
+        # Apply updates
+        if payload.user_id is not None:
+            lecture.user_id = payload.user_id
+        if payload.department_id is not None:
+            lecture.department_id = payload.department_id
+        if payload.subject_id is not None:
+            sub = db.query(models.Subject).filter(models.Subject.id == payload.subject_id).first()
+            if sub:
+                lecture.subject_id = sub.id
+                lecture.subject = sub.name
+        elif payload.subject is not None:
+            lecture.subject = payload.subject.strip()
+
+        if payload.course_id is not None:
+            c_obj = db.query(models.Course).filter(models.Course.id == payload.course_id).first()
+            if c_obj:
+                lecture.course_id = c_obj.id
+                lecture.course_name = f"{c_obj.name} ({c_obj.code})"
+        elif payload.course_name is not None:
+            lecture.course_name = payload.course_name.strip()
+
+        if payload.academic_year_id is not None:
+            lecture.academic_year_id = payload.academic_year_id
+        if payload.classroom_id is not None:
+            lecture.classroom_id = payload.classroom_id
+        lecture.room = target_room
+        if payload.semester is not None:
+            lecture.semester = payload.semester
+        if payload.lecture_type is not None:
+            lecture.lecture_type = payload.lecture_type
+        if payload.day_of_week is not None:
+            lecture.day_of_week = payload.day_of_week
+        if payload.start_time is not None:
+            lecture.start_time = payload.start_time
+        if payload.end_time is not None:
+            lecture.end_time = payload.end_time
+        if payload.substitute_faculty_id is not None:
+            lecture.substitute_faculty_id = payload.substitute_faculty_id
+
+        db.commit()
+        db.refresh(lecture)
+        return _weekly_lecture_payload(lecture)
+
+    @app.patch("/admin/timetable/{lecture_id}/status")
+    def update_timetable_status(
+        lecture_id: int,
+        payload: WeeklyLectureStatusUpdate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        lecture = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.id == lecture_id,
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        ).first()
+        if lecture is None or (admin.role == models.UserRole.HOD and lecture.department_id != admin.department_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Timetable entry not found.")
+
+        lecture.status = payload.status
+        if payload.status == "cancelled":
+            lecture.cancellation_reason = payload.cancellation_reason or "Cancelled by administrator."
+        else:
+            lecture.cancellation_reason = None
+
+        db.commit()
+        db.refresh(lecture)
+        return _weekly_lecture_payload(lecture)
+
+    @app.post("/admin/timetable/{lecture_id}/assign-substitute")
+    def assign_timetable_substitute(
+        lecture_id: int,
+        payload: WeeklyLectureSubstituteUpdate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        lecture = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.id == lecture_id,
+            models.WeeklyLecture.college_id == admin.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        ).first()
+        if lecture is None or (admin.role == models.UserRole.HOD and lecture.department_id != admin.department_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Timetable entry not found.")
+
+        if payload.substitute_faculty_id is not None:
+            sub = db.query(models.User).filter(
+                models.User.id == payload.substitute_faculty_id,
+                models.User.college_id == admin.college_id,
+                models.User.is_active.is_(True),
+            ).first()
+            if not sub:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Substitute faculty not found.")
+            # Conflict check for substitute faculty
+            sub_coll = db.query(models.WeeklyLecture).filter(
+                models.WeeklyLecture.id != lecture.id,
+                models.WeeklyLecture.college_id == admin.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.status != "cancelled",
+                models.WeeklyLecture.day_of_week == lecture.day_of_week,
+                models.WeeklyLecture.start_time < lecture.end_time,
+                models.WeeklyLecture.end_time > lecture.start_time,
+                or_(
+                    models.WeeklyLecture.user_id == sub.id,
+                    models.WeeklyLecture.substitute_faculty_id == sub.id,
+                ),
+            ).first()
+            if sub_coll:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Substitute Conflict: {sub.full_name} is already teaching '{sub_coll.subject}' during this time.",
+                )
+            lecture.substitute_faculty_id = sub.id
+        else:
+            lecture.substitute_faculty_id = None
+
         db.commit()
         db.refresh(lecture)
         return _weekly_lecture_payload(lecture)

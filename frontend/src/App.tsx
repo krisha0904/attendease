@@ -1842,7 +1842,9 @@ function TimetablePage({ user }: { user: User }) {
       </section>}
       {loading ? <Loading /> : <div className="timetable-week">
         {weekdayNames.map((day, dayIndex) => {
-          const dayLectures = (lectures || []).filter((lecture) => lecture.day_of_week === dayIndex)
+          const rawList: any = lectures
+          const lectureList: WeeklyLecture[] = Array.isArray(rawList) ? rawList : rawList?.items || []
+          const dayLectures = lectureList.filter((lecture) => lecture.day_of_week === dayIndex)
           return (
             <section className={`panel timetable-day ${dayLectures.length ? '' : 'timetable-day-empty'}`} key={day}>
               <div className="timetable-day-heading"><strong>{day}</strong><span>{dayLectures.length} lecture{dayLectures.length === 1 ? '' : 's'}</span></div>

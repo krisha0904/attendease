@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import {
-  AlertCircle, Calendar, Check, CheckCircle2,
+  AlertCircle, CheckCircle2,
   Edit3, Palmtree, Plus, RefreshCw, Trash2, X
 } from 'lucide-react'
 import { api, errorMessage, fetchJson } from './api'

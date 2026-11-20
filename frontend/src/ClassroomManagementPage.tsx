@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
-  AlertCircle, Building, Check, CheckCircle2, DoorOpen,
-  Edit3, Plus, Power, RefreshCw, School, Search, Trash2, X
+  AlertCircle, Building, CheckCircle2, DoorOpen,
+  Edit3, Plus, Power, RefreshCw, School, Search, Trash2, Users, X
 } from 'lucide-react'
 import { api, errorMessage, fetchJson } from './api'
 

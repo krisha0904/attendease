@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
   AlertCircle, Archive, Calendar, CalendarCheck, CalendarDays,
-  Check, CheckCircle2, ChevronRight, Edit3, Plus, RefreshCw, X
+  Check, CheckCircle2, Edit3, Plus, RefreshCw, X
 } from 'lucide-react'
 import { api, errorMessage, fetchJson } from './api'
 

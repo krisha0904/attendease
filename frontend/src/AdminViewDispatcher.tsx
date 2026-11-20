@@ -1,10 +1,10 @@
 import React, { useState } from 'react'
 import {
-  Activity, BookOpen, Building2, Calendar, CalendarDays,
+  Activity, Building2,
   CheckCircle2, Clock3, CreditCard, Database, Download, FileEdit,
-  FileSpreadsheet, Fingerprint, GraduationCap, Megaphone, Palmtree,
-  Plus, School, ScrollText, Settings, ShieldAlert,
-  ShieldCheck, Sliders, UserCheck, UserPlus, Users, AlertCircle
+  FileSpreadsheet, Fingerprint, Megaphone,
+  ScrollText, Settings, ShieldAlert,
+  ShieldCheck, UserCheck, UserPlus, Users, AlertCircle
 } from 'lucide-react'
 import { AdminPageScaffold } from './AdminComponents'
 import { AdminDashboardPage } from './AdminDashboardPage'
@@ -13,6 +13,7 @@ import { FaceRegistrationPage } from './FaceRegistrationPage'
 import { DepartmentManagementPage } from './DepartmentManagementPage'
 import { CourseSubjectManagementPage } from './CourseSubjectManagementPage'
 import { AcademicYearPage } from './AcademicYearPage'
+import { LectureTimetablePage } from './LectureTimetablePage'
 import { ClassroomManagementPage } from './ClassroomManagementPage'
 import { HolidayManagementPage } from './HolidayManagementPage'
 
@@ -63,26 +64,7 @@ export function AdminViewDispatcher({
       return <AcademicYearPage />
 
     case 'timetable':
-      return existingComponents.timetable ? (
-        <AdminPageScaffold
-          title="Lecture & Timetable Management"
-          eyebrow="MASTER SCHEDULE"
-          description="Configure weekly timetables, classroom allocations, prevent schedule conflicts, and notify faculty."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Add lecture session')}>
-              <Plus size={15} /> Add Lecture
-            </button>
-          }
-        >
-          {existingComponents.timetable}
-        </AdminPageScaffold>
-      ) : (
-        <AdminPageScaffold
-          title="Lecture & Timetable Management"
-          eyebrow="MASTER SCHEDULE"
-          description="Configure weekly timetables, classroom allocations, prevent schedule conflicts, and notify faculty."
-        />
-      )
+      return <LectureTimetablePage />
 
     case 'classrooms':
       return <ClassroomManagementPage />

@@ -610,12 +610,29 @@ class WeeklyLecture(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
+    # Phase 5: Academic mapping, room allocation, substitute, and status lifecycle
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="SET NULL"), nullable=True)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="SET NULL"), nullable=True)
+    academic_year_id = Column(Integer, ForeignKey("academic_years.id", ondelete="SET NULL"), nullable=True)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id", ondelete="SET NULL"), nullable=True)
+    semester = Column(Integer, nullable=True)
+    lecture_type = Column(String(30), default="Theory", nullable=False)
+    substitute_faculty_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(30), default="scheduled", nullable=False)
+    cancellation_reason = Column(Text, nullable=True)
+
     user = relationship("User", foreign_keys=[user_id])
     department = relationship("Department")
+    subject_rel = relationship("Subject", foreign_keys=[subject_id])
+    course_rel = relationship("Course", foreign_keys=[course_id])
+    academic_year = relationship("AcademicYear", foreign_keys=[academic_year_id])
+    classroom = relationship("Classroom", foreign_keys=[classroom_id])
+    substitute_faculty = relationship("User", foreign_keys=[substitute_faculty_id])
 
     __table_args__ = (
         Index("ix_weekly_lectures_college_day", "college_id", "day_of_week", "is_active"),
         Index("ix_weekly_lectures_user_day", "user_id", "day_of_week", "is_active"),
+        Index("ix_weekly_lectures_classroom_day", "classroom_id", "day_of_week", "is_active"),
     )
 
 
