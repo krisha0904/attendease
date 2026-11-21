@@ -1,11 +1,4 @@
-import React, { useState } from 'react'
-import {
-  Activity, Building2,
-  CheckCircle2, Clock3, Database, Download,
-  FileSpreadsheet, Fingerprint,
-  ScrollText, ShieldAlert,
-  ShieldCheck, UserPlus, Users
-} from 'lucide-react'
+import React from 'react'
 import { AdminPageScaffold } from './AdminComponents'
 import { AdminDashboardPage } from './AdminDashboardPage'
 import { VisitingFacultyPage } from './VisitingFacultyPage'
@@ -23,6 +16,12 @@ import { LeaveManagementPage } from './LeaveManagementPage'
 import { SubstituteManagementPage } from './SubstituteManagementPage'
 import { NotificationHubPage } from './NotificationHubPage'
 import { ReportsAnalyticsPage } from './ReportsAnalyticsPage'
+import { InstitutionSettingsPage } from './InstitutionSettingsPage'
+import { AdminRolesPage } from './AdminRolesPage'
+import { AuditLogsPage } from './AuditLogsPage'
+import { LoginMonitoringPage } from './LoginMonitoringPage'
+import { BackupRestorePage } from './BackupRestorePage'
+import { ImportExportPage } from './ImportExportPage'
 
 interface AdminViewProps {
   page: string
@@ -47,10 +46,6 @@ export function AdminViewDispatcher({
   onNavigate,
   existingComponents = {},
 }: AdminViewProps) {
-  // Common search and filter states
-  const [_searchTerm, _setSearchTerm] = useState('')
-  const [_deptFilter, _setDeptFilter] = useState('all')
-
   switch (page) {
     case 'dashboard':
       return <AdminDashboardPage onNavigate={onNavigate} />
@@ -102,334 +97,22 @@ export function AdminViewDispatcher({
       return <ReportsAnalyticsPage />
 
     case 'import_export':
-      return (
-        <AdminPageScaffold
-          title="Import & Export Management"
-          eyebrow="BULK DATA OPERATIONS"
-          description="Batch import visiting faculty, departments, subject maps, and export attendance records."
-          stats={[
-            { label: 'Faculty Records Exportable', value: '48', note: 'Full demographic schema', icon: Users },
-            { label: 'Historical Attendance', value: '2,480', note: 'All-time verified logs', icon: FileSpreadsheet },
-            { label: 'Last Export Batch', value: 'Today, 10:15 AM', note: 'CSV Attendance Digest', icon: Download },
-          ]}
-        >
-          <div className="admin-two-col-grid">
-            <div className="panel">
-              <div className="panel-heading">
-                <div>
-                  <h3>Import Master Data (CSV / Excel)</h3>
-                  <p className="muted">Upload CSV with validation, duplicate checks, and preview.</p>
-                </div>
-              </div>
-              <div className="import-box">
-                <FileSpreadsheet size={36} className="text-muted" />
-                <p>Drag and drop your faculty or schedule CSV file here, or browse.</p>
-                <button className="button button-primary">Select File to Import</button>
-              </div>
-            </div>
-
-            <div className="panel">
-              <div className="panel-heading">
-                <div>
-                  <h3>Export Institutional Records</h3>
-                  <p className="muted">Download authenticated data in Excel, CSV, or PDF format.</p>
-                </div>
-              </div>
-              <div className="export-action-list">
-                <button className="button button-secondary w-full" onClick={() => alert('Downloading Faculty CSV')}>
-                  <Download size={14} /> Export Faculty Directory (CSV)
-                </button>
-                <button className="button button-secondary w-full" onClick={() => alert('Downloading Master Attendance')}>
-                  <Download size={14} /> Export Monthly Attendance Master (CSV)
-                </button>
-                <button className="button button-secondary w-full" onClick={() => alert('Downloading Honorarium Export')}>
-                  <Download size={14} /> Export Workload & Honorarium Audit (CSV)
-                </button>
-              </div>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <ImportExportPage />
 
     case 'institution_settings':
-      return (
-        <AdminPageScaffold
-          title="Institution Settings"
-          eyebrow="CAMPUS PROFILE & POLICIES"
-          description="Configure institution profile, geofencing coordinates, punch-in windows, and biometric thresholds."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Settings Saved')}>
-              Save Changes
-            </button>
-          }
-          stats={[
-            { label: 'Campus Timezone', value: 'Asia/Kolkata', note: 'IANA Standard', icon: Clock3 },
-            { label: 'Geofence Radius', value: '100 Metres', note: 'Haversine GPS Formula', icon: Building2 },
-            { label: 'Face Match Threshold', value: '0.363 (SFace)', note: 'Strict Cosine Metric', icon: Fingerprint },
-          ]}
-        >
-          <div className="panel">
-            <div className="panel-heading">
-              <h3>Campus Profile & Branding</h3>
-            </div>
-            <div className="form-grid">
-              <label>College Name<input defaultValue="Govt. Engineering College" /></label>
-              <label>Institution Code<input defaultValue="GEC-MAIN" disabled /></label>
-              <label>Campus Address<input defaultValue="Academic Avenue, Tech Park Zone" /></label>
-              <label>Contact Phone<input defaultValue="+91 79 2397 0000" /></label>
-            </div>
-          </div>
-
-          <div className="panel">
-            <div className="panel-heading">
-              <h3>Attendance & GPS Geofence Rules</h3>
-            </div>
-            <div className="form-grid">
-              <label>Campus Latitude<input defaultValue="23.0225" /></label>
-              <label>Campus Longitude<input defaultValue="72.5714" /></label>
-              <label>Geofence Radius (meters)<input defaultValue="100" type="number" /></label>
-              <label>Lecture Punch-in Window<input defaultValue="15 minutes before scheduled start" disabled /></label>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <InstitutionSettingsPage />
 
     case 'roles_permissions':
-      return (
-        <AdminPageScaffold
-          title="Admin Roles & Permissions"
-          eyebrow="ACCESS CONTROL LIST"
-          description="Grant module permissions for Super Admin, College Admin, HOD, and Attendance Managers."
-          actions={
-            <button className="button button-primary" onClick={() => alert('New Admin User')}>
-              <UserPlus size={15} /> Add Administrator
-            </button>
-          }
-          stats={[
-            { label: 'Super Admins', value: '2', note: 'Full Root Privileges', icon: ShieldCheck },
-            { label: 'Department HODs', value: '6', note: 'Department-Scoped', icon: Users },
-            { label: 'Attendance Managers', value: '3', note: 'Punch Audit Access', icon: CheckCircle2 },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Username</th>
-                    <th>Name</th>
-                    <th>Role</th>
-                    <th>Department Scope</th>
-                    <th>Status</th>
-                    <th>Last Active</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>admin_super</strong></td>
-                    <td>Campus Administrator</td>
-                    <td><span className="badge badge-approved">Super Admin</span></td>
-                    <td>Institutional (All)</td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td>Just now</td>
-                    <td><button className="button button-secondary">Permissions</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>hod_cs</strong></td>
-                    <td>Dr. Arvind Mehta</td>
-                    <td><span className="badge badge-approved">HOD</span></td>
-                    <td>Computer Engineering</td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td>2 hours ago</td>
-                    <td><button className="button button-secondary">Permissions</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <AdminRolesPage />
 
     case 'audit_logs':
-      return (
-        <AdminPageScaffold
-          title="Audit Logs"
-          eyebrow="IMMUTABLE SECURITY RECORDS"
-          description="Audit trail of all administrative actions, timetable edits, attendance corrections, and biometric approvals."
-          stats={[
-            { label: 'Total Recorded Actions', value: '842', note: 'Protected from tampering', icon: ScrollText },
-            { label: 'Actions Today', value: '19', note: 'Logged with Admin ID & IP', icon: Activity },
-            { label: 'Security Severity', value: 'Clean', note: 'No integrity flags', icon: ShieldCheck },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>Administrator</th>
-                    <th>Action</th>
-                    <th>Resource Type</th>
-                    <th>Resource ID</th>
-                    <th>IP Address</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>19 Nov 2026, 17:15</td>
-                    <td>admin_super</td>
-                    <td>APPROVE_FACE_ENROLLMENT</td>
-                    <td>BiometricTemplate</td>
-                    <td>#42 (Dr. Rajesh Sharma)</td>
-                    <td>127.0.0.1</td>
-                  </tr>
-                  <tr>
-                    <td>19 Nov 2026, 16:40</td>
-                    <td>hod_cs</td>
-                    <td>APPROVE_ADDITIONAL_LECTURE</td>
-                    <td>AdditionalLecture</td>
-                    <td>#18 (Prof. Anita Desai)</td>
-                    <td>127.0.0.1</td>
-                  </tr>
-                  <tr>
-                    <td>19 Nov 2026, 14:22</td>
-                    <td>admin_super</td>
-                    <td>UPDATE_ATTENDANCE_CORRECTION</td>
-                    <td>AttendanceCorrection</td>
-                    <td>#09 (Accepted)</td>
-                    <td>127.0.0.1</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <AuditLogsPage />
 
     case 'login_monitoring':
-      return (
-        <AdminPageScaffold
-          title="Login & Activity Monitoring"
-          eyebrow="ACTIVE SESSIONS & THREAT DETECTION"
-          description="Real-time surveillance of user logins, failed attempts, IP addresses, and suspicious session revocation."
-          stats={[
-            { label: 'Active Sessions', value: '38', note: 'JWT Validated', icon: Activity },
-            { label: 'Failed Attempts (24h)', value: '1', note: 'Rate-limited', icon: ShieldAlert },
-            { label: 'Unique Devices', value: '44', note: 'Tracked Fingerprints', icon: ShieldCheck },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>User</th>
-                    <th>Portal</th>
-                    <th>IP Address</th>
-                    <th>Device / User Agent</th>
-                    <th>Login Time</th>
-                    <th>Session Status</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>admin_super</strong> (Admin)</td>
-                    <td>Admin Portal</td>
-                    <td>127.0.0.1</td>
-                    <td>Chrome / Windows 11</td>
-                    <td>19 Nov 2026, 17:00</td>
-                    <td><span className="badge badge-approved">Active Current</span></td>
-                    <td><em>Current Session</em></td>
-                  </tr>
-                  <tr>
-                    <td><strong>rajesh.sharma@college.edu</strong></td>
-                    <td>User Portal</td>
-                    <td>192.168.1.45</td>
-                    <td>Safari / iOS Mobile</td>
-                    <td>19 Nov 2026, 09:12</td>
-                    <td><span className="badge badge-approved">Active</span></td>
-                    <td>
-                      <button className="button button-danger" onClick={() => alert('Session Revoked')}>
-                        Revoke
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <LoginMonitoringPage />
 
     case 'backup_restore':
-      return (
-        <AdminPageScaffold
-          title="Backup & Restore Management"
-          eyebrow="DATA RESILIENCE & DISASTER RECOVERY"
-          description="Automated database snapshot backups, file integrity verification, and authorized point-in-time recovery."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Starting database snapshot...')}>
-              <Database size={15} /> Create Backup Snapshot
-            </button>
-          }
-          stats={[
-            { label: 'Latest Backup', value: 'Today, 04:00 AM', note: 'Integrity: Verified PASS', icon: Database },
-            { label: 'Backup Size', value: '42.8 MB', note: 'Encrypted SQL dump', icon: FileSpreadsheet },
-            { label: 'Snapshot Retention', value: '30 Days', note: 'Automated pruning', icon: Clock3 },
-          ]}
-        >
-          <div className="panel">
-            <div className="panel-heading">
-              <h3>Available Snapshots</h3>
-            </div>
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Snapshot File</th>
-                    <th>Date & Time</th>
-                    <th>Size</th>
-                    <th>Backup Type</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>attendease_db_20261119_0400.sql.gz</strong></td>
-                    <td>19 Nov 2026, 04:00 AM</td>
-                    <td>42.8 MB</td>
-                    <td>Automated Daily</td>
-                    <td><span className="badge badge-approved">Verified Clean</span></td>
-                    <td>
-                      <div className="admin-inline-actions">
-                        <button className="button button-secondary"><Download size={13} /> Download</button>
-                        <button className="button button-danger">Restore</button>
-                      </div>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td><strong>attendease_db_20261118_0400.sql.gz</strong></td>
-                    <td>18 Nov 2026, 04:00 AM</td>
-                    <td>41.2 MB</td>
-                    <td>Automated Daily</td>
-                    <td><span className="badge badge-approved">Verified Clean</span></td>
-                    <td>
-                      <div className="admin-inline-actions">
-                        <button className="button button-secondary"><Download size={13} /> Download</button>
-                        <button className="button button-danger">Restore</button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <BackupRestorePage />
 
     default:
       return (

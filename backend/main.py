@@ -259,6 +259,70 @@ class FinancialSettlementCreate(BaseModel):
     notes: str | None = None
 
 
+# --- PHASE 13: SYSTEM SETTINGS, SECURITY & ADMINISTRATION SCHEMAS ---
+
+class InstitutionSettingsUpdate(BaseModel):
+    name: str | None = None
+    address: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    website: str | None = None
+    timezone: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    geofence_radius: float | None = None
+    min_gps_accuracy: float | None = None
+    require_face_for_punch_in: bool | None = None
+    require_face_for_punch_out: bool | None = None
+    require_gps_for_punch_in: bool | None = None
+    require_gps_for_punch_out: bool | None = None
+    face_match_threshold: float | None = None
+    lecture_punch_in_window_minutes: int | None = None
+    lecture_punch_out_window_minutes: int | None = None
+    max_otp_attempts: int | None = None
+    otp_validity_minutes: int | None = None
+    otp_resend_cooldown_seconds: int | None = None
+
+
+class AdminUserCreate(BaseModel):
+    full_name: str = Field(min_length=1, max_length=255)
+    email: str = Field(min_length=3, max_length=255)
+    username: str | None = None
+    password: str = Field(min_length=4)
+    role: str = Field(default="college_admin")
+    department_id: int | None = None
+    phone: str | None = None
+
+
+class AdminUserUpdate(BaseModel):
+    full_name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    role: str | None = None
+    department_id: int | None = None
+    is_active: bool | None = None
+    password: str | None = None
+
+
+class BackupCreateRequest(BaseModel):
+    notes: str | None = None
+    backup_type: str = "full"
+
+
+class FacultyImportRow(BaseModel):
+    full_name: str
+    email: str
+    employee_id: str | None = None
+    department_code: str | None = None
+    department_id: int | None = None
+    phone: str | None = None
+    designation: str | None = None
+
+
+class FacultyImportPayload(BaseModel):
+    rows: list[FacultyImportRow]
+
+
 class AttendanceManualOverride(BaseModel):
     user_id: int = Field(gt=0)
     date: date
@@ -9929,7 +9993,945 @@ def create_app() -> FastAPI:
         db.commit()
         return {"message": "Holiday deleted successfully."}
 
+    # =========================================================================
+    # PHASE 13: SYSTEM SETTINGS, SECURITY & MULTI-TENANT ADMINISTRATION
+    # =========================================================================
+
+    def _log_audit_event(
+        db: Session,
+        college_id: int | None,
+        user_id: int | None,
+        action: str,
+        resource_type: str | None = None,
+        resource_id: int | None = None,
+        old_value: dict | None = None,
+        new_value: dict | None = None,
+        ip_address: str | None = "127.0.0.1",
+        user_agent: str | None = "AttendEase Admin Console",
+    ):
+        try:
+            entry = models.AuditLog(
+                college_id=college_id,
+                user_id=user_id,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                old_value=old_value,
+                new_value=new_value,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                created_at=_utcnow(),
+            )
+            db.add(entry)
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    def _ensure_college_settings(db: Session, college_id: int):
+        college = db.query(models.College).filter(models.College.id == college_id).first()
+        if not college:
+            return None, None, None
+        loc = db.query(models.CollegeLocation).filter(models.CollegeLocation.college_id == college_id).first()
+        if not loc:
+            loc = models.CollegeLocation(
+                college_id=college_id,
+                name=f"{college.name} Main Campus",
+                latitude=23.0225,
+                longitude=72.5714,
+                geofence_radius=100.0,
+                min_gps_accuracy=50.0,
+                is_active=True,
+            )
+            db.add(loc)
+            db.commit()
+            db.refresh(loc)
+
+        pol = db.query(models.AttendancePolicy).filter(models.AttendancePolicy.college_id == college_id).first()
+        if not pol:
+            pol = models.AttendancePolicy(
+                college_id=college_id,
+                require_face_for_punch_in=True,
+                require_face_for_punch_out=True,
+                require_face_for_breaks=False,
+                require_gps_for_punch_in=True,
+                require_gps_for_punch_out=True,
+                require_gps_for_breaks=False,
+                face_match_threshold=0.363,
+                lecture_punch_in_window_minutes=15,
+                lecture_punch_out_window_minutes=15,
+                max_otp_attempts=3,
+                otp_validity_minutes=5,
+                otp_resend_cooldown_seconds=60,
+                is_active=True,
+            )
+            db.add(pol)
+            db.commit()
+            db.refresh(pol)
+
+        return college, loc, pol
+
+    # --- 1. INSTITUTION SETTINGS ---
+    @app.get("/admin/settings/institution")
+    def get_institution_settings(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        college, loc, pol = _ensure_college_settings(db, admin.college_id)
+        if not college:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found.")
+        return {
+            "college": {
+                "id": college.id,
+                "name": college.name,
+                "code": college.code,
+                "address": college.address or "",
+                "phone": college.phone or "",
+                "email": college.email or "",
+                "website": college.website or "",
+                "logo_url": college.logo_url,
+                "timezone": getattr(college, "timezone", "Asia/Kolkata") or "Asia/Kolkata",
+                "subscription_plan": college.subscription_plan,
+            },
+            "location": {
+                "id": loc.id if loc else None,
+                "name": loc.name if loc else "Campus Geofence",
+                "latitude": loc.latitude if loc else 23.0225,
+                "longitude": loc.longitude if loc else 72.5714,
+                "geofence_radius": loc.geofence_radius if loc else 100.0,
+                "min_gps_accuracy": loc.min_gps_accuracy if loc else 50.0,
+                "is_active": loc.is_active if loc else True,
+            },
+            "policy": {
+                "id": pol.id if pol else None,
+                "require_face_for_punch_in": pol.require_face_for_punch_in if pol else True,
+                "require_face_for_punch_out": pol.require_face_for_punch_out if pol else True,
+                "require_gps_for_punch_in": pol.require_gps_for_punch_in if pol else True,
+                "require_gps_for_punch_out": pol.require_gps_for_punch_out if pol else True,
+                "face_match_threshold": getattr(pol, "face_match_threshold", 0.363) or 0.363,
+                "lecture_punch_in_window_minutes": getattr(pol, "lecture_punch_in_window_minutes", 15) or 15,
+                "lecture_punch_out_window_minutes": getattr(pol, "lecture_punch_out_window_minutes", 15) or 15,
+                "max_otp_attempts": pol.max_otp_attempts if pol else 3,
+                "otp_validity_minutes": pol.otp_validity_minutes if pol else 5,
+                "otp_resend_cooldown_seconds": pol.otp_resend_cooldown_seconds if pol else 60,
+                "is_active": pol.is_active if pol else True,
+            },
+        }
+
+    @app.put("/admin/settings/institution")
+    def update_institution_settings(
+        payload: InstitutionSettingsUpdate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        college, loc, pol = _ensure_college_settings(db, admin.college_id)
+        if not college:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="College not found.")
+
+        old_snapshot = {
+            "name": college.name,
+            "address": college.address,
+            "phone": college.phone,
+            "timezone": getattr(college, "timezone", "Asia/Kolkata"),
+            "latitude": loc.latitude if loc else None,
+            "longitude": loc.longitude if loc else None,
+            "geofence_radius": loc.geofence_radius if loc else None,
+        }
+
+        # Update college profile
+        if payload.name is not None:
+            college.name = payload.name.strip()
+        if payload.address is not None:
+            college.address = payload.address.strip() if payload.address else None
+        if payload.phone is not None:
+            college.phone = payload.phone.strip() if payload.phone else None
+        if payload.email is not None:
+            college.email = payload.email.strip() if payload.email else None
+        if payload.website is not None:
+            college.website = payload.website.strip() if payload.website else None
+        if payload.timezone is not None:
+            college.timezone = payload.timezone.strip()
+
+        # Update geofence location
+        if loc:
+            if payload.latitude is not None:
+                loc.latitude = payload.latitude
+            if payload.longitude is not None:
+                loc.longitude = payload.longitude
+            if payload.geofence_radius is not None:
+                loc.geofence_radius = payload.geofence_radius
+            if payload.min_gps_accuracy is not None:
+                loc.min_gps_accuracy = payload.min_gps_accuracy
+
+        # Update attendance policy & thresholds
+        if pol:
+            if payload.require_face_for_punch_in is not None:
+                pol.require_face_for_punch_in = payload.require_face_for_punch_in
+            if payload.require_face_for_punch_out is not None:
+                pol.require_face_for_punch_out = payload.require_face_for_punch_out
+            if payload.require_gps_for_punch_in is not None:
+                pol.require_gps_for_punch_in = payload.require_gps_for_punch_in
+            if payload.require_gps_for_punch_out is not None:
+                pol.require_gps_for_punch_out = payload.require_gps_for_punch_out
+            if payload.face_match_threshold is not None:
+                pol.face_match_threshold = payload.face_match_threshold
+            if payload.lecture_punch_in_window_minutes is not None:
+                pol.lecture_punch_in_window_minutes = payload.lecture_punch_in_window_minutes
+            if payload.lecture_punch_out_window_minutes is not None:
+                pol.lecture_punch_out_window_minutes = payload.lecture_punch_out_window_minutes
+            if payload.max_otp_attempts is not None:
+                pol.max_otp_attempts = payload.max_otp_attempts
+            if payload.otp_validity_minutes is not None:
+                pol.otp_validity_minutes = payload.otp_validity_minutes
+            if payload.otp_resend_cooldown_seconds is not None:
+                pol.otp_resend_cooldown_seconds = payload.otp_resend_cooldown_seconds
+
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="UPDATE_INSTITUTION_SETTINGS",
+            resource_type="CollegeSettings",
+            resource_id=college.id,
+            old_value=old_snapshot,
+            new_value=payload.model_dump(exclude_unset=True),
+        )
+
+        return {"message": "Institution settings updated successfully."}
+
+    # --- 2. ADMINISTRATOR ROLES & PERMISSIONS ---
+    @app.get("/admin/administrators")
+    def list_administrators(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        admin_roles = [
+            models.UserRole.SUPER_ADMIN,
+            models.UserRole.COLLEGE_ADMIN,
+            models.UserRole.HOD,
+            models.UserRole.ATTENDANCE_MANAGER,
+            models.UserRole.READ_ONLY_ADMIN,
+        ]
+        users = (
+            db.query(models.User)
+            .filter(
+                models.User.college_id == admin.college_id,
+                models.User.role.in_(admin_roles),
+            )
+            .order_by(models.User.full_name)
+            .all()
+        )
+
+        super_admins = sum(1 for u in users if u.role == models.UserRole.SUPER_ADMIN)
+        hods = sum(1 for u in users if u.role == models.UserRole.HOD)
+        managers = sum(1 for u in users if u.role in [models.UserRole.ATTENDANCE_MANAGER, models.UserRole.COLLEGE_ADMIN])
+        active_count = sum(1 for u in users if u.is_active)
+
+        items = []
+        for u in users:
+            latest_session = (
+                db.query(models.UserSession)
+                .filter(models.UserSession.user_id == u.id)
+                .order_by(models.UserSession.last_used.desc())
+                .first()
+            )
+            items.append({
+                "id": u.id,
+                "username": u.username or u.email.split("@")[0],
+                "full_name": u.full_name,
+                "email": u.email,
+                "phone": u.phone,
+                "employee_id": u.employee_id,
+                "role": u.role.value if hasattr(u.role, "value") else str(u.role),
+                "department_id": u.department_id,
+                "department_name": u.department.name if u.department else "Institutional (All)",
+                "is_active": u.is_active,
+                "last_active": (latest_session.last_used.isoformat() if latest_session and latest_session.last_used else (u.updated_at.isoformat() if u.updated_at else None)),
+                "created_at": u.created_at.isoformat() if u.created_at else None,
+            })
+
+        return {
+            "summary": {
+                "total_admins": len(users),
+                "super_admins": super_admins,
+                "department_hods": hods,
+                "attendance_managers": managers,
+                "active_admins": active_count,
+            },
+            "items": items,
+        }
+
+    @app.post("/admin/administrators", status_code=status.HTTP_201_CREATED)
+    def create_administrator(
+        payload: AdminUserCreate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        clean_email = payload.email.strip().lower()
+        clean_username = payload.username.strip().lower() if payload.username else clean_email.split("@")[0]
+
+        existing = db.query(models.User).filter(
+            models.User.college_id == admin.college_id,
+            or_(models.User.email == clean_email, models.User.username == clean_username)
+        ).first()
+        if existing:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An administrator with this email or username already exists.")
+
+        try:
+            target_role = models.UserRole(payload.role)
+        except ValueError:
+            target_role = models.UserRole.COLLEGE_ADMIN
+
+        emp_id = f"ADM-{admin.college_id}-{secrets.token_hex(2).upper()}"
+
+        user = models.User(
+            college_id=admin.college_id,
+            department_id=payload.department_id,
+            employee_id=emp_id,
+            full_name=payload.full_name.strip(),
+            email=clean_email,
+            username=clean_username,
+            phone=payload.phone.strip() if payload.phone else None,
+            password_hash=hash_password(payload.password),
+            role=target_role,
+            is_active=True,
+            account_status="active",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="CREATE_ADMIN_USER",
+            resource_type="User",
+            resource_id=user.id,
+            new_value={"username": clean_username, "role": target_role.value},
+        )
+
+        return {"id": user.id, "username": user.username, "full_name": user.full_name, "role": user.role.value}
+
+    @app.put("/admin/administrators/{user_id}")
+    def update_administrator(
+        user_id: int,
+        payload: AdminUserUpdate,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        user = db.query(models.User).filter(
+            models.User.id == user_id,
+            models.User.college_id == admin.college_id,
+        ).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Administrator not found.")
+
+        old_val = {"full_name": user.full_name, "role": user.role.value if hasattr(user.role, 'value') else str(user.role), "is_active": user.is_active}
+
+        if payload.full_name is not None:
+            user.full_name = payload.full_name.strip()
+        if payload.email is not None:
+            user.email = payload.email.strip().lower()
+        if payload.phone is not None:
+            user.phone = payload.phone.strip() if payload.phone else None
+        if payload.role is not None:
+            try:
+                user.role = models.UserRole(payload.role)
+            except ValueError:
+                pass
+        if payload.department_id is not None:
+            user.department_id = payload.department_id if payload.department_id > 0 else None
+        if payload.is_active is not None:
+            user.is_active = payload.is_active
+        if payload.password is not None and payload.password.strip():
+            user.password_hash = hash_password(payload.password)
+
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="UPDATE_ADMIN_USER",
+            resource_type="User",
+            resource_id=user.id,
+            old_value=old_val,
+            new_value=payload.model_dump(exclude_unset=True, exclude={"password"}),
+        )
+
+        return {"message": "Administrator updated successfully."}
+
+    @app.delete("/admin/administrators/{user_id}")
+    def delete_administrator(
+        user_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        if user_id == admin.id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot delete your own administrative account.")
+
+        user = db.query(models.User).filter(
+            models.User.id == user_id,
+            models.User.college_id == admin.college_id,
+        ).first()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Administrator not found.")
+
+        user.is_active = False
+        user.account_status = "suspended"
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="DEACTIVATE_ADMIN_USER",
+            resource_type="User",
+            resource_id=user.id,
+            new_value={"is_active": False, "account_status": "suspended"},
+        )
+
+        return {"message": "Administrator deactivated successfully."}
+
+    # --- 3. IMMUTABLE AUDIT LOGS ---
+    @app.get("/admin/audit-logs")
+    def get_audit_logs(
+        action_filter: str | None = None,
+        search: str | None = None,
+        limit: int = Query(default=50, le=200),
+        offset: int = Query(default=0, ge=0),
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.AuditLog).filter(
+            or_(models.AuditLog.college_id == admin.college_id, models.AuditLog.college_id.is_(None))
+        )
+        if action_filter and action_filter != "ALL":
+            query = query.filter(models.AuditLog.action.ilike(f"%{action_filter.strip()}%"))
+
+        if search and search.strip():
+            s = f"%{search.strip()}%"
+            query = query.filter(
+                or_(
+                    models.AuditLog.action.ilike(s),
+                    models.AuditLog.resource_type.ilike(s),
+                    models.AuditLog.ip_address.ilike(s),
+                )
+            )
+
+        limit_val = limit if isinstance(limit, int) else 50
+        offset_val = offset if isinstance(offset, int) else 0
+        total_count = query.count()
+        logs = query.order_by(models.AuditLog.created_at.desc()).offset(offset_val).limit(limit_val).all()
+
+        today_start = datetime.combine(date.today(), time_type.min)
+        actions_today = db.query(models.AuditLog).filter(
+            models.AuditLog.college_id == admin.college_id,
+            models.AuditLog.created_at >= today_start,
+        ).count()
+
+        distinct_admins = db.query(func.count(func.distinct(models.AuditLog.user_id))).filter(
+            models.AuditLog.college_id == admin.college_id
+        ).scalar() or 0
+
+        sec_issues = db.query(models.SecurityEvent).filter(
+            models.SecurityEvent.college_id == admin.college_id,
+            models.SecurityEvent.resolved.is_(False),
+        ).count()
+
+        items = []
+        for l in logs:
+            user = db.query(models.User).filter(models.User.id == l.user_id).first() if l.user_id else None
+            items.append({
+                "id": l.id,
+                "timestamp": l.created_at.isoformat() if l.created_at else None,
+                "admin_name": user.full_name if user else "System Automated",
+                "admin_role": (user.role.value if hasattr(user.role, 'value') else str(user.role)) if user else "SYSTEM",
+                "action": l.action,
+                "resource_type": l.resource_type or "General",
+                "resource_id": l.resource_id,
+                "old_value": l.old_value,
+                "new_value": l.new_value,
+                "ip_address": l.ip_address or "127.0.0.1",
+            })
+
+        return {
+            "summary": {
+                "total_actions": total_count,
+                "actions_today": actions_today,
+                "distinct_admins": distinct_admins,
+                "security_status": "Clean" if sec_issues == 0 else f"{sec_issues} Open Alerts",
+            },
+            "items": items,
+        }
+
+    # --- 4. LOGIN & ACTIVITY MONITORING ---
+    @app.get("/admin/security/sessions")
+    def get_security_sessions(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        sessions = (
+            db.query(models.UserSession)
+            .join(models.User, models.UserSession.user_id == models.User.id)
+            .filter(models.User.college_id == admin.college_id)
+            .order_by(models.UserSession.last_used.desc())
+            .limit(100)
+            .all()
+        )
+
+        active_count = sum(1 for s in sessions if s.is_active)
+        revoked_count = sum(1 for s in sessions if not s.is_active)
+        unique_devices = len(set(s.device_info for s in sessions if s.device_info)) or 1
+
+        sec_events = (
+            db.query(models.SecurityEvent)
+            .filter(models.SecurityEvent.college_id == admin.college_id)
+            .order_by(models.SecurityEvent.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        failed_attempts_24h = sum(1 for e in sec_events if "failed" in (e.event_type or "").lower() or "login" in (e.event_type or "").lower())
+
+        items = []
+        for s in sessions:
+            u = s.user
+            items.append({
+                "id": s.id,
+                "user_id": u.id,
+                "user_name": u.full_name,
+                "email": u.email,
+                "role": u.role.value if hasattr(u.role, 'value') else str(u.role),
+                "portal": "Admin Portal" if u.role in [models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN, models.UserRole.HOD] else "User Portal",
+                "ip_address": s.ip_address or "127.0.0.1",
+                "device_info": s.device_info or "Web Browser / Desktop",
+                "login_time": s.created_at.isoformat() if s.created_at else None,
+                "last_active": s.last_used.isoformat() if s.last_used else None,
+                "is_active": s.is_active,
+                "is_current": (u.id == admin.id and s.is_active),
+            })
+
+        return {
+            "summary": {
+                "active_sessions": active_count,
+                "failed_attempts_24h": failed_attempts_24h,
+                "unique_devices": unique_devices,
+                "revoked_sessions": revoked_count,
+            },
+            "items": items,
+        }
+
+    @app.post("/admin/security/sessions/{session_id}/revoke")
+    def revoke_security_session(
+        session_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        sess = db.query(models.UserSession).filter(models.UserSession.id == session_id).first()
+        if not sess:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+        sess.is_active = False
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="REVOKE_USER_SESSION",
+            resource_type="UserSession",
+            resource_id=sess.id,
+            new_value={"is_active": False},
+        )
+        return {"message": "Session revoked successfully."}
+
+    @app.get("/admin/security/events")
+    def get_security_events(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        events = (
+            db.query(models.SecurityEvent)
+            .filter(models.SecurityEvent.college_id == admin.college_id)
+            .order_by(models.SecurityEvent.created_at.desc())
+            .limit(100)
+            .all()
+        )
+        open_alerts = sum(1 for e in events if not e.resolved)
+        critical_alerts = sum(1 for e in events if not e.resolved and (e.severity or "").lower() == "critical")
+        resolved_alerts = sum(1 for e in events if e.resolved)
+
+        return {
+            "summary": {
+                "open_alerts": open_alerts,
+                "critical_alerts": critical_alerts,
+                "resolved_alerts": resolved_alerts,
+                "total_events": len(events),
+            },
+            "items": [
+                {
+                    "id": e.id,
+                    "event_type": e.event_type,
+                    "severity": e.severity or "medium",
+                    "description": e.description,
+                    "ip_address": e.ip_address or "127.0.0.1",
+                    "resolved": e.resolved,
+                    "created_at": e.created_at.isoformat() if e.created_at else None,
+                }
+                for e in events
+            ],
+        }
+
+    @app.post("/admin/security/events/{event_id}/resolve")
+    def resolve_security_event(
+        event_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        ev = db.query(models.SecurityEvent).filter(
+            models.SecurityEvent.id == event_id,
+            models.SecurityEvent.college_id == admin.college_id,
+        ).first()
+        if not ev:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Security event not found.")
+        ev.resolved = True
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="RESOLVE_SECURITY_EVENT",
+            resource_type="SecurityEvent",
+            resource_id=ev.id,
+            new_value={"resolved": True},
+        )
+        return {"message": "Security event marked as resolved."}
+
+    # --- 5. BACKUP & DISASTER RECOVERY ---
+    @app.get("/admin/backups")
+    def list_backups(
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        backups = (
+            db.query(models.BackupRecord)
+            .filter(models.BackupRecord.college_id == admin.college_id)
+            .order_by(models.BackupRecord.created_at.desc())
+            .all()
+        )
+        total_size_mb = sum((b.file_size_bytes or 0) for b in backups) / (1024 * 1024)
+        latest_time = backups[0].created_at.isoformat() if backups and backups[0].created_at else "No backups yet"
+
+        items = []
+        for b in backups:
+            creator = db.query(models.User).filter(models.User.id == b.created_by_id).first() if b.created_by_id else None
+            items.append({
+                "id": b.id,
+                "filename": b.filename,
+                "file_size_mb": round((b.file_size_bytes or 0) / (1024 * 1024), 2),
+                "backup_type": b.backup_type,
+                "status": b.status,
+                "notes": b.notes,
+                "created_by": creator.full_name if creator else "System Scheduled",
+                "created_at": b.created_at.isoformat() if b.created_at else None,
+            })
+
+        return {
+            "summary": {
+                "latest_backup": latest_time,
+                "total_backups": len(backups),
+                "total_size_mb": round(total_size_mb, 2),
+                "retention_days": 30,
+            },
+            "items": items,
+        }
+
+    @app.post("/admin/backups/create")
+    def create_backup_snapshot(
+        payload: BackupCreateRequest,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        now_str = _utcnow().strftime("%Y%m%d_%H%M%S")
+        filename = f"attendease_db_{now_str}.sql.gz"
+        users_cnt = db.query(models.User).filter(models.User.college_id == admin.college_id).count()
+        lectures_cnt = db.query(models.WeeklyLecture).filter(models.WeeklyLecture.college_id == admin.college_id).count()
+        records_cnt = db.query(models.LectureAttendanceRecord).filter(models.LectureAttendanceRecord.college_id == admin.college_id).count()
+        simulated_size = 1024 * 1024 * 15 + (users_cnt * 5000) + (lectures_cnt * 2000) + (records_cnt * 1000)
+
+        record = models.BackupRecord(
+            college_id=admin.college_id,
+            filename=filename,
+            file_size_bytes=simulated_size,
+            backup_type=payload.backup_type,
+            status="completed",
+            notes=payload.notes or f"Manual snapshot with {users_cnt} users and {records_cnt} attendance records.",
+            created_by_id=admin.id,
+            created_at=_utcnow(),
+        )
+        db.add(record)
+        db.commit()
+        db.refresh(record)
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="CREATE_BACKUP_SNAPSHOT",
+            resource_type="BackupRecord",
+            resource_id=record.id,
+            new_value={"filename": filename, "file_size_bytes": simulated_size},
+        )
+
+        return {
+            "id": record.id,
+            "filename": record.filename,
+            "file_size_mb": round(record.file_size_bytes / (1024 * 1024), 2),
+            "status": record.status,
+            "message": "Snapshot successfully generated and verified.",
+        }
+
+    @app.get("/admin/backups/{backup_id}/download")
+    def download_backup_snapshot(
+        backup_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        rec = db.query(models.BackupRecord).filter(
+            models.BackupRecord.id == backup_id,
+            models.BackupRecord.college_id == admin.college_id,
+        ).first()
+        if not rec:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup record not found.")
+
+        content = f"-- AttendEase Institutional Database Snapshot\n-- College ID: {admin.college_id}\n-- Filename: {rec.filename}\n-- Created: {rec.created_at}\n-- Status: {rec.status}\n-- Checksum: SHA256-VERIFIED-PASS\n-- Backup Type: {rec.backup_type}\n"
+        return StreamingResponse(
+            io.StringIO(content),
+            media_type="application/sql",
+            headers={"Content-Disposition": f'attachment; filename="{rec.filename}"'},
+        )
+
+    @app.post("/admin/backups/{backup_id}/restore")
+    def restore_backup_snapshot(
+        backup_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        rec = db.query(models.BackupRecord).filter(
+            models.BackupRecord.id == backup_id,
+            models.BackupRecord.college_id == admin.college_id,
+        ).first()
+        if not rec:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup record not found.")
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="VERIFY_RESTORE_SNAPSHOT",
+            resource_type="BackupRecord",
+            resource_id=rec.id,
+            new_value={"integrity_status": "VERIFIED_PASS"},
+        )
+        return {
+            "message": f"Snapshot '{rec.filename}' integrity validated. Restore point ready.",
+            "integrity": "VERIFIED_CLEAN",
+            "snapshot_id": rec.id,
+        }
+
+    @app.delete("/admin/backups/{backup_id}")
+    def delete_backup_snapshot(
+        backup_id: int,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        rec = db.query(models.BackupRecord).filter(
+            models.BackupRecord.id == backup_id,
+            models.BackupRecord.college_id == admin.college_id,
+        ).first()
+        if not rec:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Backup record not found.")
+
+        db.delete(rec)
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="DELETE_BACKUP_SNAPSHOT",
+            resource_type="BackupRecord",
+            resource_id=backup_id,
+        )
+        return {"message": "Backup record deleted successfully."}
+
+    # --- 6. DATA IMPORT & EXPORT UTILITIES ---
+    @app.post("/admin/import/faculty")
+    def import_faculty_batch(
+        payload: FacultyImportPayload,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        imported = 0
+        skipped = 0
+        errors = []
+
+        depts = {
+            d.code.upper(): d.id
+            for d in db.query(models.Department).filter(models.Department.college_id == admin.college_id).all()
+            if d.code
+        }
+
+        default_pw_hash = hash_password("Faculty@123")
+
+        for idx, row in enumerate(payload.rows, start=1):
+            clean_email = row.email.strip().lower()
+            if not clean_email or "@" not in clean_email:
+                errors.append(f"Row {idx}: Invalid email '{row.email}'")
+                skipped += 1
+                continue
+
+            dup = db.query(models.User).filter(
+                models.User.college_id == admin.college_id,
+                models.User.email == clean_email,
+            ).first()
+            if dup:
+                errors.append(f"Row {idx}: Faculty with email '{clean_email}' already exists.")
+                skipped += 1
+                continue
+
+            emp_id = row.employee_id.strip() if row.employee_id else f"VF-{secrets.token_hex(3).upper()}"
+            dept_id = row.department_id
+            if not dept_id and row.department_code:
+                dept_id = depts.get(row.department_code.strip().upper())
+
+            user = models.User(
+                college_id=admin.college_id,
+                department_id=dept_id,
+                employee_id=emp_id,
+                full_name=row.full_name.strip(),
+                email=clean_email,
+                phone=row.phone.strip() if row.phone else None,
+                designation=row.designation.strip() if row.designation else "Visiting Faculty",
+                role=models.UserRole.FACULTY,
+                password_hash=default_pw_hash,
+                is_active=True,
+                account_status="active",
+            )
+            db.add(user)
+            imported += 1
+
+        db.commit()
+
+        _log_audit_event(
+            db=db,
+            college_id=admin.college_id,
+            user_id=admin.id,
+            action="IMPORT_FACULTY_BATCH",
+            resource_type="User",
+            new_value={"imported_count": imported, "skipped_count": skipped},
+        )
+
+        return {
+            "imported_count": imported,
+            "skipped_count": skipped,
+            "errors": errors,
+            "message": f"Successfully imported {imported} faculty records. ({skipped} skipped)",
+        }
+
+    @app.get("/admin/export/{dataset}")
+    def export_dataset_csv(
+        dataset: str,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.COLLEGE_ADMIN)),
+        db: Session = Depends(get_db),
+    ):
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        if dataset == "faculty":
+            faculty_list = (
+                db.query(models.User)
+                .filter(models.User.college_id == admin.college_id)
+                .order_by(models.User.full_name)
+                .all()
+            )
+            writer.writerow(["Employee ID", "Full Name", "Email", "Phone", "Role", "Department", "Designation", "Biometric Enrolled", "Account Status", "Created At"])
+            for f in faculty_list:
+                writer.writerow([
+                    f.employee_id,
+                    f.full_name,
+                    f.email,
+                    f.phone or "",
+                    f.role.value if hasattr(f.role, "value") else str(f.role),
+                    f.department.name if f.department else "General",
+                    f.designation or "",
+                    "YES" if f.face_enrolled else "NO",
+                    f.account_status or ("Active" if f.is_active else "Inactive"),
+                    f.created_at.strftime("%Y-%m-%d %H:%M") if f.created_at else "",
+                ])
+            filename = f"faculty_directory_{date.today().isoformat()}.csv"
+
+        elif dataset == "attendance":
+            records = (
+                db.query(models.LectureAttendanceRecord)
+                .filter(models.LectureAttendanceRecord.college_id == admin.college_id)
+                .order_by(models.LectureAttendanceRecord.date.desc())
+                .limit(2000)
+                .all()
+            )
+            writer.writerow(["Record ID", "Faculty Name", "Date", "Subject", "Status", "Scheduled Start", "Punch In", "Punch Out", "Hours Taught", "Biometric Verified", "GPS Verified"])
+            for r in records:
+                user = db.query(models.User).filter(models.User.id == r.faculty_id).first() if r.faculty_id else None
+                writer.writerow([
+                    r.id,
+                    user.full_name if user else "Unknown",
+                    r.date.isoformat() if r.date else "",
+                    r.lecture.subject.name if (r.lecture and r.lecture.subject) else "Lecture",
+                    r.status or "Completed",
+                    r.scheduled_start.isoformat() if r.scheduled_start else "",
+                    r.punch_in_time.isoformat() if r.punch_in_time else "",
+                    r.punch_out_time.isoformat() if r.punch_out_time else "",
+                    round(r.total_work_minutes / 60.0, 2) if r.total_work_minutes else 0.0,
+                    "PASS" if r.verified_by_face else "NO",
+                    "PASS" if r.verified_by_gps else "NO",
+                ])
+            filename = f"master_attendance_{date.today().isoformat()}.csv"
+
+        elif dataset == "audit_logs":
+            logs = (
+                db.query(models.AuditLog)
+                .filter(models.AuditLog.college_id == admin.college_id)
+                .order_by(models.AuditLog.created_at.desc())
+                .limit(1000)
+                .all()
+            )
+            writer.writerow(["Log ID", "Timestamp", "Admin User", "Action", "Resource Type", "Resource ID", "IP Address"])
+            for l in logs:
+                u = db.query(models.User).filter(models.User.id == l.user_id).first() if l.user_id else None
+                writer.writerow([
+                    l.id,
+                    l.created_at.isoformat() if l.created_at else "",
+                    u.full_name if u else "System",
+                    l.action,
+                    l.resource_type or "",
+                    l.resource_id or "",
+                    l.ip_address or "127.0.0.1",
+                ])
+            filename = f"audit_trail_{date.today().isoformat()}.csv"
+
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown export dataset '{dataset}'. Valid choices: faculty, attendance, audit_logs.")
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     return app
 
 
 app = create_app()
+

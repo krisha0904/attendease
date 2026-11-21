@@ -80,6 +80,7 @@ class College(Base):
     is_active = Column(Boolean, default=True)
     subscription_plan = Column(String(50), default="basic")
     subscription_expires = Column(Date)
+    timezone = Column(String(50), default="Asia/Kolkata")
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
@@ -500,6 +501,9 @@ class AttendancePolicy(Base):
     require_gps_for_punch_in = Column(Boolean, default=True)
     require_gps_for_punch_out = Column(Boolean, default=True)
     require_gps_for_breaks = Column(Boolean, default=False)
+    face_match_threshold = Column(Float, default=0.363)
+    lecture_punch_in_window_minutes = Column(Integer, default=15)
+    lecture_punch_out_window_minutes = Column(Integer, default=15)
     max_otp_attempts = Column(Integer, default=3)
     otp_validity_minutes = Column(Integer, default=5)
     otp_resend_cooldown_seconds = Column(Integer, default=60)
