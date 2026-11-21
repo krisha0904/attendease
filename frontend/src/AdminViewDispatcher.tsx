@@ -18,6 +18,7 @@ import { ClassroomManagementPage } from './ClassroomManagementPage'
 import { HolidayManagementPage } from './HolidayManagementPage'
 import { AttendanceManagementPage } from './AttendanceManagementPage'
 import { AttendanceCorrectionsPage } from './AttendanceCorrectionsPage'
+import { AvailabilityManagementPage } from './AvailabilityManagementPage'
 
 interface AdminViewProps {
   page: string
@@ -81,56 +82,7 @@ export function AdminViewDispatcher({
       return <AttendanceCorrectionsPage />
 
     case 'availability':
-      return (
-        <AdminPageScaffold
-          title="Availability Management"
-          eyebrow="FACULTY WORK PREFERENCES"
-          description="Review visiting faculty working slot preferences and approved availability windows for timetable scheduling."
-          stats={[
-            { label: 'Submitted Preferences', value: '46', note: '95.8% Faculty Response', icon: UserCheck },
-            { label: 'Approved Windows', value: '44', note: 'Locked into Master Timetable', icon: CheckCircle2 },
-            { label: 'Changes Pending', value: '2', note: 'Requires Admin approval', icon: Clock3 },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Faculty</th>
-                    <th>Department</th>
-                    <th>Day of Week</th>
-                    <th>Available Window</th>
-                    <th>Max Hours / Wk</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>Dr. Rajesh Sharma</td>
-                    <td>Computer Engineering</td>
-                    <td>Mon, Wed, Fri</td>
-                    <td>09:00 AM – 02:00 PM</td>
-                    <td>15 Hours</td>
-                    <td><span className="badge badge-approved">Approved</span></td>
-                    <td><button className="button button-secondary">Adjust</button></td>
-                  </tr>
-                  <tr>
-                    <td>Prof. Anita Desai</td>
-                    <td>Information Technology</td>
-                    <td>Tue, Thu, Sat</td>
-                    <td>10:00 AM – 04:00 PM</td>
-                    <td>18 Hours</td>
-                    <td><span className="badge badge-approved">Approved</span></td>
-                    <td><button className="button button-secondary">Adjust</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <AvailabilityManagementPage />
 
     case 'leave':
       return existingComponents.leave ? (

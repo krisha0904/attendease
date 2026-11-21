@@ -970,11 +970,15 @@ class FacultyAvailability(Base):
     start_time = Column(Time, nullable=False)
     end_time = Column(Time, nullable=False)
     is_available = Column(Boolean, default=True)
-    status = Column(String(20), default="approved")
+    status = Column(String(20), default="approved") # pending, approved, rejected
     notes = Column(String(255), nullable=True)
+    reviewed_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reviewed_at = Column(DateTime, nullable=True)
+    admin_remarks = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     faculty = relationship("User", foreign_keys=[faculty_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by_id])
 
     __table_args__ = (
         Index("idx_availability_faculty_day", "college_id", "faculty_id", "day_of_week"),

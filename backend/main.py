@@ -237,6 +237,27 @@ class AttendanceCorrectionReview(BaseModel):
     admin_remarks: str | None = Field(default=None, max_length=1000)
 
 
+class FacultyAvailabilityCreate(BaseModel):
+    faculty_id: int | None = None
+    day_of_week: int = Field(ge=0, le=6)
+    start_time: str
+    end_time: str
+    is_available: bool = True
+    notes: str | None = None
+
+
+class FacultyAvailabilityUpdate(BaseModel):
+    start_time: str | None = None
+    end_time: str | None = None
+    is_available: bool | None = None
+    notes: str | None = None
+
+
+class FacultyAvailabilityReview(BaseModel):
+    action: str = Field(pattern="^(approve|reject)$")
+    admin_remarks: str | None = Field(default=None, max_length=1000)
+
+
 class AdditionalLectureCreate(BaseModel):
     lecture_date: date
     subject: str = Field(min_length=1, max_length=200)
@@ -1082,6 +1103,37 @@ def _attendance_correction_payload(c: models.AttendanceCorrection) -> dict:
         "reviewed_by_name": reviewer.full_name if reviewer else None,
         "reviewed_at": c.reviewed_at.isoformat() if c.reviewed_at else None,
         "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
+
+
+def _faculty_availability_payload(a: models.FacultyAvailability) -> dict:
+    fac = a.faculty
+    reviewer = a.reviewer
+
+    st_str = a.start_time.strftime("%H:%M") if hasattr(a.start_time, "strftime") else str(a.start_time)[:5]
+    et_str = a.end_time.strftime("%H:%M") if hasattr(a.end_time, "strftime") else str(a.end_time)[:5]
+    day_name = WEEKDAY_NAMES[a.day_of_week] if 0 <= a.day_of_week < len(WEEKDAY_NAMES) else f"Day {a.day_of_week}"
+
+    return {
+        "id": a.id,
+        "faculty_id": a.faculty_id,
+        "faculty_name": fac.full_name if fac else "Unknown",
+        "employee_id": fac.employee_id if fac else "",
+        "faculty_email": fac.email if fac else "",
+        "department_id": fac.department_id if fac else None,
+        "department_name": fac.department.name if (fac and fac.department) else None,
+        "day_of_week": a.day_of_week,
+        "day_name": day_name,
+        "start_time": st_str,
+        "end_time": et_str,
+        "is_available": bool(a.is_available),
+        "status": a.status or "approved",
+        "notes": a.notes,
+        "reviewed_by_id": a.reviewed_by_id,
+        "reviewed_by_name": reviewer.full_name if reviewer else None,
+        "reviewed_at": a.reviewed_at.isoformat() if a.reviewed_at else None,
+        "admin_remarks": a.admin_remarks,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
     }
 
 
@@ -5733,6 +5785,312 @@ def create_app() -> FastAPI:
             .all()
         )
         return [_attendance_correction_payload(c) for c in rows]
+
+    # =========================================================================
+    # PHASE 8: FACULTY AVAILABILITY MANAGEMENT ENDPOINTS
+    # =========================================================================
+
+    @app.get("/admin/faculty-availability")
+    def list_faculty_availabilities(
+        search: str | None = None,
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        day_of_week: int | None = None,
+        status_filter: str | None = None,
+        is_available: bool | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.FacultyAvailability).filter(
+            models.FacultyAvailability.college_id == admin.college_id
+        )
+
+        if faculty_id:
+            query = query.filter(models.FacultyAvailability.faculty_id == faculty_id)
+
+        if day_of_week is not None and day_of_week >= 0:
+            query = query.filter(models.FacultyAvailability.day_of_week == day_of_week)
+
+        if status_filter and status_filter.lower() != "all":
+            query = query.filter(models.FacultyAvailability.status == status_filter.lower())
+
+        if is_available is not None:
+            query = query.filter(models.FacultyAvailability.is_available == is_available)
+
+        if department_id or search:
+            query = query.join(models.User, models.FacultyAvailability.faculty_id == models.User.id)
+            if department_id:
+                query = query.filter(models.User.department_id == department_id)
+            if search:
+                term = f"%{search.strip()}%"
+                query = query.filter(
+                    or_(
+                        models.User.full_name.ilike(term),
+                        models.User.email.ilike(term),
+                        models.User.employee_id.ilike(term),
+                    )
+                )
+
+        rows = (
+            query.order_by(
+                models.FacultyAvailability.day_of_week.asc(),
+                models.FacultyAvailability.start_time.asc(),
+            ).all()
+        )
+
+        all_college_rows = (
+            db.query(models.FacultyAvailability)
+            .filter(models.FacultyAvailability.college_id == admin.college_id)
+            .all()
+        )
+        total_windows = len(all_college_rows)
+        approved_windows = sum(1 for r in all_college_rows if r.status == "approved" and r.is_available)
+        pending_requests = sum(1 for r in all_college_rows if r.status == "pending")
+        blackout_windows = sum(1 for r in all_college_rows if not r.is_available)
+        distinct_faculty = len({r.faculty_id for r in all_college_rows if r.status == "approved"})
+
+        return {
+            "items": [_faculty_availability_payload(a) for a in rows],
+            "kpis": {
+                "total_windows": total_windows,
+                "approved_windows": approved_windows,
+                "pending_requests": pending_requests,
+                "blackout_windows": blackout_windows,
+                "faculty_covered": distinct_faculty,
+            },
+        }
+
+    @app.post("/admin/faculty-availability")
+    def create_faculty_availability_admin(
+        payload: FacultyAvailabilityCreate,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        if not payload.faculty_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Faculty ID is required for administrative availability definition.",
+            )
+        fac = (
+            db.query(models.User)
+            .filter(
+                models.User.id == payload.faculty_id,
+                models.User.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not fac:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Faculty member not found.",
+            )
+
+        try:
+            sp = payload.start_time.strip().split(":")
+            st = time_type(int(sp[0]), int(sp[1]))
+            ep = payload.end_time.strip().split(":")
+            et = time_type(int(ep[0]), int(ep[1]))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid time format. Expected HH:MM.",
+            )
+
+        if et <= st:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End time must be strictly after start time.",
+            )
+
+        avail = models.FacultyAvailability(
+            college_id=admin.college_id,
+            faculty_id=payload.faculty_id,
+            day_of_week=payload.day_of_week,
+            start_time=st,
+            end_time=et,
+            is_available=payload.is_available,
+            notes=payload.notes.strip() if payload.notes else None,
+            status="approved",
+            reviewed_by_id=admin.id,
+            reviewed_at=datetime.utcnow(),
+            admin_remarks="Assigned directly by administrator.",
+        )
+        db.add(avail)
+        db.commit()
+        db.refresh(avail)
+
+        return _faculty_availability_payload(avail)
+
+    @app.put("/admin/faculty-availability/{avail_id}")
+    def update_faculty_availability_admin(
+        avail_id: int,
+        payload: FacultyAvailabilityUpdate,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        avail = (
+            db.query(models.FacultyAvailability)
+            .filter(
+                models.FacultyAvailability.id == avail_id,
+                models.FacultyAvailability.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not avail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Faculty availability record not found.",
+            )
+
+        if payload.start_time is not None:
+            try:
+                sp = payload.start_time.strip().split(":")
+                avail.start_time = time_type(int(sp[0]), int(sp[1]))
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid start_time format.",
+                )
+
+        if payload.end_time is not None:
+            try:
+                ep = payload.end_time.strip().split(":")
+                avail.end_time = time_type(int(ep[0]), int(ep[1]))
+            except Exception:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid end_time format.",
+                )
+
+        if avail.end_time <= avail.start_time:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End time must be strictly after start time.",
+            )
+
+        if payload.is_available is not None:
+            avail.is_available = payload.is_available
+
+        if payload.notes is not None:
+            avail.notes = payload.notes.strip() if payload.notes else None
+
+        avail.reviewed_by_id = admin.id
+        avail.reviewed_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(avail)
+        return _faculty_availability_payload(avail)
+
+    @app.post("/admin/faculty-availability/{avail_id}/review")
+    def review_faculty_availability(
+        avail_id: int,
+        payload: FacultyAvailabilityReview,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        avail = (
+            db.query(models.FacultyAvailability)
+            .filter(
+                models.FacultyAvailability.id == avail_id,
+                models.FacultyAvailability.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not avail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Availability window record not found.",
+            )
+
+        new_status = "approved" if payload.action == "approve" else "rejected"
+        avail.status = new_status
+        avail.reviewed_by_id = admin.id
+        avail.reviewed_at = datetime.utcnow()
+        avail.admin_remarks = payload.admin_remarks.strip() if payload.admin_remarks else None
+
+        db.commit()
+        db.refresh(avail)
+        return _faculty_availability_payload(avail)
+
+    @app.delete("/admin/faculty-availability/{avail_id}")
+    def delete_faculty_availability(
+        avail_id: int,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        avail = (
+            db.query(models.FacultyAvailability)
+            .filter(
+                models.FacultyAvailability.id == avail_id,
+                models.FacultyAvailability.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not avail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Availability record not found.",
+            )
+        db.delete(avail)
+        db.commit()
+        return {"message": "Availability window removed successfully."}
+
+    @app.post("/faculty-availability")
+    def submit_faculty_availability(
+        payload: FacultyAvailabilityCreate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        try:
+            sp = payload.start_time.strip().split(":")
+            st = time_type(int(sp[0]), int(sp[1]))
+            ep = payload.end_time.strip().split(":")
+            et = time_type(int(ep[0]), int(ep[1]))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid time format. Expected HH:MM.",
+            )
+
+        if et <= st:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="End time must be strictly after start time.",
+            )
+
+        avail = models.FacultyAvailability(
+            college_id=user.college_id,
+            faculty_id=user.id,
+            day_of_week=payload.day_of_week,
+            start_time=st,
+            end_time=et,
+            is_available=payload.is_available,
+            notes=payload.notes.strip() if payload.notes else None,
+            status="pending",
+        )
+        db.add(avail)
+        db.commit()
+        db.refresh(avail)
+        return _faculty_availability_payload(avail)
+
+    @app.get("/faculty-availability/mine")
+    def get_my_faculty_availabilities(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        rows = (
+            db.query(models.FacultyAvailability)
+            .filter(
+                models.FacultyAvailability.college_id == user.college_id,
+                models.FacultyAvailability.faculty_id == user.id,
+            )
+            .order_by(
+                models.FacultyAvailability.day_of_week.asc(),
+                models.FacultyAvailability.start_time.asc(),
+            )
+            .all()
+        )
+        return [_faculty_availability_payload(a) for a in rows]
 
     # =========================================================================
     # PHASE 2: VISITING FACULTY MANAGEMENT ENDPOINTS
