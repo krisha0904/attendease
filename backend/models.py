@@ -1052,6 +1052,28 @@ class FacultyPaymentRate(Base):
     subject = relationship("Subject", foreign_keys=[subject_id])
 
 
+class FinancialSettlement(Base):
+    __tablename__ = "financial_settlements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    faculty_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    total_lectures = Column(Integer, default=0)
+    total_hours = Column(Float, default=0.0)
+    gross_amount = Column(Float, default=0.0)
+    status = Column(String(20), default="settled")  # processed, settled, paid
+    settled_at = Column(DateTime, nullable=True)
+    settled_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    transaction_ref = Column(String(100), nullable=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    faculty = relationship("User", foreign_keys=[faculty_id])
+    settled_by = relationship("User", foreign_keys=[settled_by_id])
+
+
 class BackupRecord(Base):
     __tablename__ = "backup_records"
 

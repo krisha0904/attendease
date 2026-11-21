@@ -1,5 +1,7 @@
+import csv
 import hashlib
 import hmac
+import io
 import math
 import os
 import secrets
@@ -11,11 +13,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
-from sqlalchemy import func, or_
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -235,6 +238,25 @@ class AnnouncementCreate(BaseModel):
     target_department_id: int | None = None
     action_url: str | None = Field(default=None, max_length=500)
     expires_at: datetime | None = None
+
+
+class FacultyPaymentRateSet(BaseModel):
+    faculty_id: int | None = None
+    subject_id: int | None = None
+    rate_per_lecture: float = Field(default=0.0, ge=0)
+    rate_per_hour: float = Field(default=0.0, ge=0)
+    effective_from: date | None = None
+
+
+class FinancialSettlementCreate(BaseModel):
+    faculty_id: int = Field(gt=0)
+    period_start: date
+    period_end: date
+    total_lectures: int = Field(default=0, ge=0)
+    total_hours: float = Field(default=0.0, ge=0)
+    gross_amount: float = Field(default=0.0, ge=0)
+    transaction_ref: str | None = None
+    notes: str | None = None
 
 
 class AttendanceManualOverride(BaseModel):
@@ -8470,6 +8492,397 @@ def create_app() -> FastAPI:
             .limit(20)
         )
         return [_announcement_payload(a) for a in query.all()]
+
+    # =========================================================================
+    # PHASE 12: REPORTS, ANALYTICS & FINANCIAL SETTLEMENTS
+    # =========================================================================
+
+    def _ensure_default_payment_rate(db: Session, college_id: int):
+        existing = (
+            db.query(models.FacultyPaymentRate)
+            .filter(
+                models.FacultyPaymentRate.college_id == college_id,
+                models.FacultyPaymentRate.faculty_id.is_(None),
+                models.FacultyPaymentRate.subject_id.is_(None),
+            )
+            .first()
+        )
+        if not existing:
+            default_rate = models.FacultyPaymentRate(
+                college_id=college_id,
+                faculty_id=None,
+                subject_id=None,
+                rate_per_lecture=1500.0,
+                rate_per_hour=1000.0,
+                effective_from=_utcnow().date(),
+            )
+            db.add(default_rate)
+            db.commit()
+
+    @app.get("/admin/reports/payment-rates")
+    def list_faculty_payment_rates(
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        _ensure_default_payment_rate(db, admin.college_id)
+        rates = (
+            db.query(models.FacultyPaymentRate)
+            .filter(models.FacultyPaymentRate.college_id == admin.college_id)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "faculty_id": r.faculty_id,
+                "faculty_name": r.faculty.full_name if r.faculty else "Default (All Visiting Faculty)",
+                "subject_id": r.subject_id,
+                "subject_name": r.subject.name if r.subject else "General",
+                "rate_per_lecture": r.rate_per_lecture,
+                "rate_per_hour": r.rate_per_hour,
+                "effective_from": r.effective_from.isoformat() if r.effective_from else None,
+            }
+            for r in rates
+        ]
+
+    @app.post("/admin/reports/payment-rates")
+    def set_faculty_payment_rate(
+        payload: FacultyPaymentRateSet,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        existing = (
+            db.query(models.FacultyPaymentRate)
+            .filter(
+                models.FacultyPaymentRate.college_id == admin.college_id,
+                models.FacultyPaymentRate.faculty_id == payload.faculty_id,
+                models.FacultyPaymentRate.subject_id == payload.subject_id,
+            )
+            .first()
+        )
+        if existing:
+            existing.rate_per_lecture = payload.rate_per_lecture
+            existing.rate_per_hour = payload.rate_per_hour
+            if payload.effective_from:
+                existing.effective_from = payload.effective_from
+            rate_obj = existing
+        else:
+            rate_obj = models.FacultyPaymentRate(
+                college_id=admin.college_id,
+                faculty_id=payload.faculty_id,
+                subject_id=payload.subject_id,
+                rate_per_lecture=payload.rate_per_lecture,
+                rate_per_hour=payload.rate_per_hour,
+                effective_from=payload.effective_from or _utcnow().date(),
+            )
+            db.add(rate_obj)
+
+        db.commit()
+        db.refresh(rate_obj)
+        return {
+            "id": rate_obj.id,
+            "faculty_id": rate_obj.faculty_id,
+            "rate_per_lecture": rate_obj.rate_per_lecture,
+            "rate_per_hour": rate_obj.rate_per_hour,
+            "effective_from": rate_obj.effective_from.isoformat() if rate_obj.effective_from else None,
+        }
+
+    @app.get("/admin/reports/honorarium")
+    def get_honorarium_report(
+        date_from: date | None = None,
+        date_to: date | None = None,
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        _ensure_default_payment_rate(db, admin.college_id)
+        now_dt = _utcnow()
+        dt_start = date_from or date(now_dt.year, now_dt.month, 1)
+        dt_end = date_to or now_dt.date()
+
+        default_rate = (
+            db.query(models.FacultyPaymentRate)
+            .filter(
+                models.FacultyPaymentRate.college_id == admin.college_id,
+                models.FacultyPaymentRate.faculty_id.is_(None),
+            )
+            .first()
+        )
+        base_lecture_rate = default_rate.rate_per_lecture if default_rate else 1500.0
+        base_hour_rate = default_rate.rate_per_hour if default_rate else 1000.0
+
+        fac_query = (
+            db.query(models.User)
+            .filter(
+                models.User.college_id == admin.college_id,
+                models.User.is_active.is_(True),
+                models.User.role.in_([models.UserRole.FACULTY, models.UserRole.HOD]),
+            )
+        )
+        if faculty_id:
+            fac_query = fac_query.filter(models.User.id == faculty_id)
+        if department_id:
+            fac_query = fac_query.filter(models.User.department_id == department_id)
+
+        faculty_list = fac_query.order_by(models.User.full_name.asc()).all()
+
+        items = []
+        tot_honorarium = 0.0
+        tot_lectures = 0
+        tot_hours = 0.0
+        tot_punctual = 0
+        tot_punches = 0
+        settled_total = 0.0
+
+        for fac in faculty_list:
+            spec_rate = (
+                db.query(models.FacultyPaymentRate)
+                .filter(
+                    models.FacultyPaymentRate.college_id == admin.college_id,
+                    models.FacultyPaymentRate.faculty_id == fac.id,
+                )
+                .first()
+            )
+            rate_lec = spec_rate.rate_per_lecture if spec_rate and spec_rate.rate_per_lecture > 0 else base_lecture_rate
+            rate_hr = spec_rate.rate_per_hour if spec_rate and spec_rate.rate_per_hour > 0 else base_hour_rate
+
+            lec_recs = (
+                db.query(models.LectureAttendanceRecord)
+                .join(models.WeeklyLecture, models.LectureAttendanceRecord.weekly_lecture_id == models.WeeklyLecture.id)
+                .filter(
+                    models.WeeklyLecture.college_id == admin.college_id,
+                    models.LectureAttendanceRecord.lecture_date >= dt_start,
+                    models.LectureAttendanceRecord.lecture_date <= dt_end,
+                    or_(
+                        models.WeeklyLecture.substitute_faculty_id == fac.id,
+                        and_(
+                            models.WeeklyLecture.user_id == fac.id,
+                            models.WeeklyLecture.substitute_faculty_id.is_(None),
+                        ),
+                    ),
+                    models.LectureAttendanceRecord.punch_in_time.isnot(None),
+                )
+                .all()
+            )
+
+            completed_count = len(lec_recs)
+            total_duration_hours = 0.0
+            punctual_count = 0
+
+            for rec in lec_recs:
+                tot_punches += 1
+                if rec.punch_in_time and rec.weekly_lecture:
+                    sched_start = rec.weekly_lecture.start_time
+                    p_time = rec.punch_in_time.time() if hasattr(rec.punch_in_time, "time") else rec.punch_in_time
+                    if p_time <= sched_start:
+                        punctual_count += 1
+                        tot_punctual += 1
+
+                if rec.punch_in_time and rec.punch_out_time:
+                    dur_sec = (rec.punch_out_time - rec.punch_in_time).total_seconds()
+                    total_duration_hours += max(0.5, dur_sec / 3600.0)
+                elif rec.weekly_lecture:
+                    st_mins = rec.weekly_lecture.start_time.hour * 60 + rec.weekly_lecture.start_time.minute
+                    et_mins = rec.weekly_lecture.end_time.hour * 60 + rec.weekly_lecture.end_time.minute
+                    total_duration_hours += max(0.5, (et_mins - st_mins) / 60.0)
+                else:
+                    total_duration_hours += 1.0
+
+            punctuality_pct = round((punctual_count / completed_count * 100), 1) if completed_count > 0 else 100.0
+            gross_amount = round(completed_count * rate_lec, 2)
+
+            settlement = (
+                db.query(models.FinancialSettlement)
+                .filter(
+                    models.FinancialSettlement.college_id == admin.college_id,
+                    models.FinancialSettlement.faculty_id == fac.id,
+                    models.FinancialSettlement.period_start <= dt_end,
+                    models.FinancialSettlement.period_end >= dt_start,
+                )
+                .first()
+            )
+            is_settled = bool(settlement and settlement.status in ("settled", "paid"))
+            settle_status = settlement.status if settlement else "pending"
+            settle_date = settlement.settled_at.isoformat() if settlement and settlement.settled_at else None
+            settle_ref = settlement.transaction_ref if settlement else None
+
+            if is_settled:
+                settled_total += gross_amount
+
+            tot_honorarium += gross_amount
+            tot_lectures += completed_count
+            tot_hours += total_duration_hours
+
+            dept_name = fac.department.name if fac.department else "General"
+            items.append({
+                "faculty_id": fac.id,
+                "faculty_name": fac.full_name,
+                "employee_id": fac.employee_id,
+                "email": fac.email,
+                "department_name": dept_name,
+                "completed_lectures": completed_count,
+                "total_hours_delivered": round(total_duration_hours, 1),
+                "punctuality_rate": punctuality_pct,
+                "rate_per_lecture": rate_lec,
+                "rate_per_hour": rate_hr,
+                "gross_amount": gross_amount,
+                "settlement_status": settle_status,
+                "settlement_date": settle_date,
+                "transaction_ref": settle_ref,
+            })
+
+        avg_punctuality = round((tot_punctual / tot_punches * 100), 1) if tot_punches > 0 else 100.0
+
+        return {
+            "period": {
+                "date_from": dt_start.isoformat(),
+                "date_to": dt_end.isoformat(),
+            },
+            "items": items,
+            "kpis": {
+                "total_honorarium_payable": round(tot_honorarium, 2),
+                "total_lectures_conducted": tot_lectures,
+                "total_hours_delivered": round(tot_hours, 1),
+                "average_punctuality_rate": avg_punctuality,
+                "settled_amount": round(settled_total, 2),
+                "pending_amount": round(tot_honorarium - settled_total, 2),
+            },
+        }
+
+    @app.post("/admin/reports/settle")
+    def settle_faculty_honorarium(
+        payload: FinancialSettlementCreate,
+        request: Request,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        fac = (
+            db.query(models.User)
+            .filter(
+                models.User.id == payload.faculty_id,
+                models.User.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not fac:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Faculty member not found.")
+
+        settlement = models.FinancialSettlement(
+            college_id=admin.college_id,
+            faculty_id=fac.id,
+            period_start=payload.period_start,
+            period_end=payload.period_end,
+            total_lectures=payload.total_lectures,
+            total_hours=payload.total_hours,
+            gross_amount=payload.gross_amount,
+            status="settled",
+            settled_at=_utcnow(),
+            settled_by_id=admin.id,
+            transaction_ref=payload.transaction_ref.strip() if payload.transaction_ref else f"PAY-{_utcnow().strftime('%Y%m%d%H%M')}-{fac.id}",
+            notes=payload.notes.strip() if payload.notes else None,
+        )
+        db.add(settlement)
+
+        db.add(
+            models.Notification(
+                user_id=fac.id,
+                college_id=admin.college_id,
+                title="Honorarium Payout Settled",
+                message=f"Honorarium of ₹{payload.gross_amount:,.2f} for period {payload.period_start} to {payload.period_end} has been processed (Ref: {settlement.transaction_ref}).",
+                type="success",
+            )
+        )
+
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="honorarium.settled",
+                resource_type="financial_settlement",
+                resource_id=settlement.id,
+                new_value={
+                    "faculty_id": fac.id,
+                    "gross_amount": payload.gross_amount,
+                    "ref": settlement.transaction_ref,
+                },
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        db.refresh(settlement)
+
+        return {
+            "id": settlement.id,
+            "faculty_id": fac.id,
+            "faculty_name": fac.full_name,
+            "gross_amount": settlement.gross_amount,
+            "status": settlement.status,
+            "transaction_ref": settlement.transaction_ref,
+            "settled_at": settlement.settled_at.isoformat(),
+        }
+
+    @app.get("/admin/reports/honorarium/export")
+    def export_honorarium_csv(
+        date_from: date | None = None,
+        date_to: date | None = None,
+        department_id: int | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        report_data = get_honorarium_report(
+            date_from=date_from,
+            date_to=date_to,
+            department_id=department_id,
+            faculty_id=None,
+            admin=admin,
+            db=db,
+        )
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Employee ID",
+            "Faculty Name",
+            "Department",
+            "Period Start",
+            "Period End",
+            "Delivered Lectures",
+            "Delivered Hours",
+            "Punctuality %",
+            "Rate / Lecture (INR)",
+            "Rate / Hour (INR)",
+            "Gross Honorarium (INR)",
+            "Settlement Status",
+            "Transaction Reference",
+            "Settled Date",
+        ])
+
+        p_start = report_data["period"]["date_from"]
+        p_end = report_data["period"]["date_to"]
+
+        for item in report_data["items"]:
+            writer.writerow([
+                item["employee_id"],
+                item["faculty_name"],
+                item["department_name"],
+                p_start,
+                p_end,
+                item["completed_lectures"],
+                item["total_hours_delivered"],
+                f"{item['punctuality_rate']}%",
+                item["rate_per_lecture"],
+                item["rate_per_hour"],
+                item["gross_amount"],
+                item["settlement_status"].upper(),
+                item["transaction_ref"] or "N/A",
+                item["settlement_date"] or "N/A",
+            ])
+
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="honorarium-{p_start}-to-{p_end}.csv"'},
+        )
 
     # =========================================================================
     # PHASE 4: ACADEMIC MANAGEMENT (DEPARTMENTS, COURSES, SUBJECTS, AY, CLASSROOMS, HOLIDAYS)

@@ -1,9 +1,9 @@
 import React, { useState } from 'react'
 import {
   Activity, Building2,
-  CheckCircle2, Clock3, CreditCard, Database, Download,
+  CheckCircle2, Clock3, Database, Download,
   FileSpreadsheet, Fingerprint,
-  ScrollText, Settings, ShieldAlert,
+  ScrollText, ShieldAlert,
   ShieldCheck, UserPlus, Users
 } from 'lucide-react'
 import { AdminPageScaffold } from './AdminComponents'
@@ -22,6 +22,7 @@ import { AvailabilityManagementPage } from './AvailabilityManagementPage'
 import { LeaveManagementPage } from './LeaveManagementPage'
 import { SubstituteManagementPage } from './SubstituteManagementPage'
 import { NotificationHubPage } from './NotificationHubPage'
+import { ReportsAnalyticsPage } from './ReportsAnalyticsPage'
 
 interface AdminViewProps {
   page: string
@@ -97,86 +98,8 @@ export function AdminViewDispatcher({
       return <NotificationHubPage />
 
     case 'reports':
-      return existingComponents.reports ? (
-        <AdminPageScaffold
-          title="Reports & Analytics"
-          eyebrow="ANALYTICS & EXPORTS"
-          description="Generate daily, weekly, and monthly attendance reports, workload analytics, and compliance summaries."
-        >
-          {existingComponents.reports}
-        </AdminPageScaffold>
-      ) : (
-        <AdminPageScaffold
-          title="Reports & Analytics"
-          eyebrow="ANALYTICS & EXPORTS"
-          description="Generate daily, weekly, and monthly attendance reports, workload analytics, and compliance summaries."
-        />
-      )
-
     case 'workload_payment':
-      return (
-        <AdminPageScaffold
-          title="Workload & Payment Summary"
-          eyebrow="HONORARIUM & BILLING PREPARATION"
-          description="Audit total taught hours, verified lecture completions, hourly billing rates, and monthly remuneration."
-          actions={
-            <div className="admin-actions-row">
-              <button className="button button-primary" onClick={() => alert('Export honorarium statement')}>
-                <Download size={15} /> Export Honorarium Sheet (CSV)
-              </button>
-              <button className="button button-secondary" onClick={() => alert('Configure rates')}>
-                <Settings size={15} /> Configure Rates
-              </button>
-            </div>
-          }
-          stats={[
-            { label: 'Completed Lectures', value: '312', note: 'November Month', icon: Clock3 },
-            { label: 'Total Teaching Hours', value: '468 hrs', note: 'Face & GPS Verified', icon: Activity },
-            { label: 'Estimated Payable', value: '₹ 4,68,000', note: 'Based on ₹1,000 / hr default', icon: CreditCard },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Faculty ID</th>
-                    <th>Faculty Name</th>
-                    <th>Department</th>
-                    <th>Lectures Done</th>
-                    <th>Taught Hours</th>
-                    <th>Rate / Hr</th>
-                    <th>Estimated Amount</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>VF-2025-001</strong></td>
-                    <td>Dr. Rajesh Sharma</td>
-                    <td>Computer Engineering</td>
-                    <td>24</td>
-                    <td>36 hrs</td>
-                    <td>₹ 1,200</td>
-                    <td><strong>₹ 43,200</strong></td>
-                    <td><button className="button button-secondary">Audit Sheet</button></td>
-                  </tr>
-                  <tr>
-                    <td><strong>VF-2025-002</strong></td>
-                    <td>Prof. Anita Desai</td>
-                    <td>Information Technology</td>
-                    <td>28</td>
-                    <td>42 hrs</td>
-                    <td>₹ 1,000</td>
-                    <td><strong>₹ 42,000</strong></td>
-                    <td><button className="button button-secondary">Audit Sheet</button></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <ReportsAnalyticsPage />
 
     case 'import_export':
       return (
