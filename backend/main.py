@@ -223,6 +223,20 @@ class AttendanceManualOverride(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class AttendanceCorrectionCreate(BaseModel):
+    user_id: int | None = None
+    target_date: date
+    requested_punch_in: str | None = None
+    requested_punch_out: str | None = None
+    reason: str = Field(min_length=3, max_length=1000)
+    lecture_record_id: int | None = None
+
+
+class AttendanceCorrectionReview(BaseModel):
+    action: str = Field(pattern="^(approve|reject)$")
+    admin_remarks: str | None = Field(default=None, max_length=1000)
+
+
 class AdditionalLectureCreate(BaseModel):
     lecture_date: date
     subject: str = Field(min_length=1, max_length=200)
@@ -1036,6 +1050,38 @@ def _attendance_payload(record: models.AttendanceRecord) -> dict:
         "overridden_by_id": record.overridden_by_id,
         "overridden_by_name": overridden_name,
         "overridden_at": record.overridden_at.isoformat() if record.overridden_at else None,
+    }
+
+
+def _attendance_correction_payload(c: models.AttendanceCorrection) -> dict:
+    fac = c.faculty
+    reviewer = c.reviewer
+
+    orig_in = c.original_punch_in.strftime("%H:%M") if c.original_punch_in else None
+    orig_out = c.original_punch_out.strftime("%H:%M") if c.original_punch_out else None
+    req_in = c.requested_punch_in.strftime("%H:%M") if c.requested_punch_in else None
+    req_out = c.requested_punch_out.strftime("%H:%M") if c.requested_punch_out else None
+
+    return {
+        "id": c.id,
+        "target_date": c.target_date.isoformat(),
+        "faculty_id": c.faculty_id,
+        "faculty_name": fac.full_name if fac else "Unknown",
+        "employee_id": fac.employee_id if fac else "",
+        "faculty_email": fac.email if fac else "",
+        "department_id": fac.department_id if fac else None,
+        "department_name": fac.department.name if (fac and fac.department) else None,
+        "original_punch_in": orig_in,
+        "original_punch_out": orig_out,
+        "requested_punch_in": req_in,
+        "requested_punch_out": req_out,
+        "reason": c.reason,
+        "status": c.status or "pending",
+        "admin_remarks": c.admin_remarks,
+        "reviewed_by_id": c.reviewed_by_id,
+        "reviewed_by_name": reviewer.full_name if reviewer else None,
+        "reviewed_at": c.reviewed_at.isoformat() if c.reviewed_at else None,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
     }
 
 
@@ -5278,7 +5324,7 @@ def create_app() -> FastAPI:
         if payload.punch_in_time:
             try:
                 parts = payload.punch_in_time.split(":")
-                p_in_dt = datetime.combine(payload.date, time(int(parts[0]), int(parts[1])))
+                p_in_dt = datetime.combine(payload.date, time_type(int(parts[0]), int(parts[1])))
             except Exception:
                 p_in_dt = now
 
@@ -5286,7 +5332,7 @@ def create_app() -> FastAPI:
         if payload.punch_out_time:
             try:
                 parts = payload.punch_out_time.split(":")
-                p_out_dt = datetime.combine(payload.date, time(int(parts[0]), int(parts[1])))
+                p_out_dt = datetime.combine(payload.date, time_type(int(parts[0]), int(parts[1])))
             except Exception:
                 p_out_dt = now
 
@@ -5416,6 +5462,277 @@ def create_app() -> FastAPI:
             media_type="text/csv",
             headers={"Content-Disposition": f"attachment; filename=attendance_{target_start}_{target_end}.csv"},
         )
+
+    # =========================================================================
+    # PHASE 7: ATTENDANCE CORRECTIONS (DISCREPANCY WORKFLOW & AUDIT)
+    # =========================================================================
+
+    @app.get("/admin/attendance-corrections")
+    def list_admin_attendance_corrections(
+        status_filter: str = "all",
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        search: str | None = None,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        query = (
+            db.query(models.AttendanceCorrection)
+            .join(models.User, models.User.id == models.AttendanceCorrection.faculty_id)
+            .filter(models.AttendanceCorrection.college_id == admin.college_id)
+        )
+        if admin.role == models.UserRole.HOD:
+            query = query.filter(models.User.department_id == admin.department_id)
+        elif department_id is not None:
+            query = query.filter(models.User.department_id == department_id)
+
+        if faculty_id is not None:
+            query = query.filter(models.AttendanceCorrection.faculty_id == faculty_id)
+
+        if status_filter != "all":
+            query = query.filter(models.AttendanceCorrection.status == status_filter)
+
+        if start_date:
+            query = query.filter(models.AttendanceCorrection.target_date >= start_date)
+        if end_date:
+            query = query.filter(models.AttendanceCorrection.target_date <= end_date)
+
+        if search and search.strip():
+            term = f"%{search.strip().lower()}%"
+            query = query.filter(
+                or_(
+                    func.lower(models.User.full_name).like(term),
+                    func.lower(models.User.employee_id).like(term),
+                    func.lower(models.AttendanceCorrection.reason).like(term),
+                )
+            )
+
+        rows = query.order_by(models.AttendanceCorrection.created_at.desc()).limit(1000).all()
+
+        # Summary KPIs
+        all_q = db.query(models.AttendanceCorrection).filter(models.AttendanceCorrection.college_id == admin.college_id)
+        if admin.role == models.UserRole.HOD:
+            all_q = all_q.join(models.User, models.User.id == models.AttendanceCorrection.faculty_id).filter(models.User.department_id == admin.department_id)
+        all_corrections = all_q.all()
+
+        pending_cnt = sum(1 for c in all_corrections if c.status == "pending")
+        approved_cnt = sum(1 for c in all_corrections if c.status == "approved")
+        rejected_cnt = sum(1 for c in all_corrections if c.status == "rejected")
+
+        summary = {
+            "total_requests": len(all_corrections),
+            "pending_count": pending_cnt,
+            "approved_count": approved_cnt,
+            "rejected_count": rejected_cnt,
+        }
+
+        return {
+            "items": [_attendance_correction_payload(c) for c in rows],
+            "summary": summary,
+            "total_records": len(rows),
+        }
+
+    @app.post("/admin/attendance-corrections/{correction_id}/review")
+    def review_attendance_correction(
+        correction_id: int,
+        payload: AttendanceCorrectionReview,
+        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        db: Session = Depends(get_db),
+    ):
+        corr = db.query(models.AttendanceCorrection).filter(
+            models.AttendanceCorrection.id == correction_id,
+            models.AttendanceCorrection.college_id == admin.college_id,
+        ).first()
+        if not corr:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attendance correction request not found.")
+
+        fac = corr.faculty
+        if admin.role == models.UserRole.HOD and fac.department_id != admin.department_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+        now = _attendance_now()
+
+        if payload.action == "reject":
+            if not payload.admin_remarks or not payload.admin_remarks.strip():
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rejection remarks are mandatory to explain why the request was declined.")
+            corr.status = "rejected"
+            corr.admin_remarks = payload.admin_remarks.strip()
+            corr.reviewed_by_id = admin.id
+            corr.reviewed_at = now
+
+            # Send Notification to faculty
+            db.add(models.Notification(
+                user_id=corr.faculty_id,
+                college_id=admin.college_id,
+                title="Attendance Correction Declined",
+                message=f"Your attendance correction request for {corr.target_date.isoformat()} was rejected: {corr.admin_remarks}",
+                type="warning",
+            ))
+            db.commit()
+            db.refresh(corr)
+            return {
+                "message": f"Attendance correction request #{corr.id} rejected.",
+                "correction": _attendance_correction_payload(corr),
+            }
+
+        # Action == "approve"
+        # 1. Update or create the underlying AttendanceRecord
+        att_rec = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.user_id == corr.faculty_id,
+            models.AttendanceRecord.college_id == admin.college_id,
+            models.AttendanceRecord.date == corr.target_date,
+        ).first()
+
+        p_in_dt = corr.requested_punch_in or (att_rec.punch_in_time if att_rec else None)
+        p_out_dt = corr.requested_punch_out or (att_rec.punch_out_time if att_rec else None)
+
+        if not att_rec:
+            att_rec = models.AttendanceRecord(
+                college_id=admin.college_id,
+                user_id=corr.faculty_id,
+                date=corr.target_date,
+                status=models.AttendanceStatus.PRESENT,
+                punch_in_time=p_in_dt,
+                punch_out_time=p_out_dt,
+                is_manual_override=True,
+                override_reason=f"Approved Correction Request #{corr.id}: {corr.reason}",
+                overridden_by_id=admin.id,
+                overridden_at=now,
+            )
+            db.add(att_rec)
+            db.flush()
+        else:
+            att_rec.status = models.AttendanceStatus.PRESENT
+            if corr.requested_punch_in:
+                att_rec.punch_in_time = corr.requested_punch_in
+            if corr.requested_punch_out:
+                att_rec.punch_out_time = corr.requested_punch_out
+            att_rec.is_manual_override = True
+            att_rec.override_reason = f"Approved Correction Request #{corr.id}: {corr.reason}"
+            att_rec.overridden_by_id = admin.id
+            att_rec.overridden_at = now
+
+        # Compute working minutes
+        if att_rec.punch_in_time and att_rec.punch_out_time:
+            att_rec.total_working_minutes = _working_minutes(att_rec.punch_in_time, att_rec.punch_out_time)
+            att_rec.net_working_minutes = max(0, att_rec.total_working_minutes - (att_rec.total_break_minutes or 0))
+
+        # 2. Update Correction Record
+        corr.status = "approved"
+        corr.admin_remarks = payload.admin_remarks.strip() if payload.admin_remarks else "Approved by administrator"
+        corr.reviewed_by_id = admin.id
+        corr.reviewed_at = now
+        corr.attendance_record_id = att_rec.id
+
+        # 3. Log Audit AttendanceEvent
+        import uuid
+        db.add(models.AttendanceEvent(
+            attendance_id=att_rec.id,
+            user_id=corr.faculty_id,
+            event_type=f"correction_approved_request_{corr.id}",
+            event_time=now,
+            idempotency_key=str(uuid.uuid4()),
+            ip_address="admin_console",
+        ))
+
+        # 4. Notify Faculty
+        db.add(models.Notification(
+            user_id=corr.faculty_id,
+            college_id=admin.college_id,
+            title="Attendance Correction Approved",
+            message=f"Your attendance correction request for {corr.target_date.isoformat()} was approved. Attendance record updated to Present.",
+            type="success",
+        ))
+
+        db.commit()
+        db.refresh(corr)
+
+        return {
+            "message": f"Attendance correction request #{corr.id} approved successfully and attendance record updated.",
+            "correction": _attendance_correction_payload(corr),
+        }
+
+    @app.post("/attendance-corrections")
+    def submit_attendance_correction(
+        payload: AttendanceCorrectionCreate,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        target_user_id = user.id
+        if payload.user_id and user.role in ADMIN_ROLES:
+            target_user_id = payload.user_id
+
+        target_user = db.query(models.User).filter(
+            models.User.id == target_user_id,
+            models.User.college_id == user.college_id,
+            models.User.is_active.is_(True),
+        ).first()
+        if not target_user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target faculty member not found.")
+
+        # Find existing attendance record to populate original timestamps
+        att_rec = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.user_id == target_user_id,
+            models.AttendanceRecord.college_id == user.college_id,
+            models.AttendanceRecord.date == payload.target_date,
+        ).first()
+
+        orig_in = att_rec.punch_in_time if att_rec else None
+        orig_out = att_rec.punch_out_time if att_rec else None
+
+        # Parse requested times
+        req_in_dt = None
+        if payload.requested_punch_in:
+            try:
+                parts = payload.requested_punch_in.split(":")
+                req_in_dt = datetime.combine(payload.target_date, time_type(int(parts[0]), int(parts[1])))
+            except Exception:
+                pass
+
+        req_out_dt = None
+        if payload.requested_punch_out:
+            try:
+                parts = payload.requested_punch_out.split(":")
+                req_out_dt = datetime.combine(payload.target_date, time_type(int(parts[0]), int(parts[1])))
+            except Exception:
+                pass
+
+        corr = models.AttendanceCorrection(
+            college_id=user.college_id,
+            faculty_id=target_user_id,
+            attendance_record_id=att_rec.id if att_rec else None,
+            lecture_record_id=payload.lecture_record_id,
+            target_date=payload.target_date,
+            original_punch_in=orig_in,
+            original_punch_out=orig_out,
+            requested_punch_in=req_in_dt,
+            requested_punch_out=req_out_dt,
+            reason=payload.reason.strip(),
+            status="pending",
+        )
+        db.add(corr)
+        db.commit()
+        db.refresh(corr)
+
+        return _attendance_correction_payload(corr)
+
+    @app.get("/attendance-corrections/mine")
+    def get_my_attendance_corrections(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        rows = (
+            db.query(models.AttendanceCorrection)
+            .filter(
+                models.AttendanceCorrection.college_id == user.college_id,
+                models.AttendanceCorrection.faculty_id == user.id,
+            )
+            .order_by(models.AttendanceCorrection.created_at.desc())
+            .all()
+        )
+        return [_attendance_correction_payload(c) for c in rows]
 
     # =========================================================================
     # PHASE 2: VISITING FACULTY MANAGEMENT ENDPOINTS

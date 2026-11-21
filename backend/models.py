@@ -953,6 +953,7 @@ class AttendanceCorrection(Base):
 
     faculty = relationship("User", foreign_keys=[faculty_id])
     reviewer = relationship("User", foreign_keys=[reviewed_by_id])
+    attendance_record = relationship("AttendanceRecord", foreign_keys=[attendance_record_id])
 
     __table_args__ = (
         Index("idx_corrections_college_faculty", "college_id", "faculty_id"),

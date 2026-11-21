@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import {
   Activity, Building2,
-  CheckCircle2, Clock3, CreditCard, Database, Download, FileEdit,
+  CheckCircle2, Clock3, CreditCard, Database, Download,
   FileSpreadsheet, Fingerprint, Megaphone,
   ScrollText, Settings, ShieldAlert,
   ShieldCheck, UserCheck, UserPlus, Users, AlertCircle
@@ -17,6 +17,7 @@ import { LectureTimetablePage } from './LectureTimetablePage'
 import { ClassroomManagementPage } from './ClassroomManagementPage'
 import { HolidayManagementPage } from './HolidayManagementPage'
 import { AttendanceManagementPage } from './AttendanceManagementPage'
+import { AttendanceCorrectionsPage } from './AttendanceCorrectionsPage'
 
 interface AdminViewProps {
   page: string
@@ -77,54 +78,7 @@ export function AdminViewDispatcher({
       return <AttendanceManagementPage />
 
     case 'attendance_corrections':
-      return (
-        <AdminPageScaffold
-          title="Attendance Corrections"
-          eyebrow="PUNCH DISCREPANCY WORKFLOW"
-          description="Review faculty manual adjustment requests, original punch timestamps, and maintain immutable audit trails."
-          stats={[
-            { label: 'Pending Requests', value: '2', note: 'Awaiting Administrator Review', icon: FileEdit },
-            { label: 'Approved This Month', value: '7', note: 'Audit logged with admin ID', icon: CheckCircle2 },
-            { label: 'Rejected', value: '1', note: 'Missing justification remarks', icon: AlertCircle },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Request ID</th>
-                    <th>Faculty Name</th>
-                    <th>Date</th>
-                    <th>Original Punch</th>
-                    <th>Requested Punch</th>
-                    <th>Reason</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td><strong>CR-2025-101</strong></td>
-                    <td>Dr. Rajesh Sharma</td>
-                    <td>18 Nov 2026</td>
-                    <td>Punch Out: Missed</td>
-                    <td>Punch Out: 04:30 PM</td>
-                    <td>Exam invigilation duty in hall 3 without phone</td>
-                    <td><span className="badge badge-pending">Pending Review</span></td>
-                    <td>
-                      <div className="admin-inline-actions">
-                        <button className="button button-primary" onClick={() => alert('Approve Correction')}>Approve</button>
-                        <button className="button button-danger" onClick={() => alert('Reject Correction')}>Reject</button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <AttendanceCorrectionsPage />
 
     case 'availability':
       return (
