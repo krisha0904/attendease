@@ -19,6 +19,7 @@ import { HolidayManagementPage } from './HolidayManagementPage'
 import { AttendanceManagementPage } from './AttendanceManagementPage'
 import { AttendanceCorrectionsPage } from './AttendanceCorrectionsPage'
 import { AvailabilityManagementPage } from './AvailabilityManagementPage'
+import { LeaveManagementPage } from './LeaveManagementPage'
 
 interface AdminViewProps {
   page: string
@@ -85,21 +86,7 @@ export function AdminViewDispatcher({
       return <AvailabilityManagementPage />
 
     case 'leave':
-      return existingComponents.leave ? (
-        <AdminPageScaffold
-          title="Leave Management"
-          eyebrow="FACULTY ABSENCE & EXCUSAL"
-          description="Review leave applications, identify affected lectures, and assign substitute visiting faculty."
-        >
-          {existingComponents.leave}
-        </AdminPageScaffold>
-      ) : (
-        <AdminPageScaffold
-          title="Leave Management"
-          eyebrow="FACULTY ABSENCE & EXCUSAL"
-          description="Review leave applications, identify affected lectures, and assign substitute visiting faculty."
-        />
-      )
+      return <LeaveManagementPage onNavigateToTimetable={() => onNavigate('timetable')} />
 
     case 'substitute_faculty':
       return (

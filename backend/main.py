@@ -481,6 +481,8 @@ class LeaveApplicationCreate(BaseModel):
     start_date: date
     end_date: date
     reason: str = Field(min_length=1, max_length=4000)
+    document_url: str | None = None
+    faculty_id: int | None = None
 
     @model_validator(mode="after")
     def valid_range(self):
@@ -489,6 +491,30 @@ class LeaveApplicationCreate(BaseModel):
         if (self.end_date - self.start_date).days > 365:
             raise ValueError("A leave request cannot exceed one year.")
         return self
+
+
+class AdminLeaveCreate(BaseModel):
+    faculty_id: int
+    leave_type_id: int
+    start_date: date
+    end_date: date
+    reason: str = Field(min_length=1, max_length=4000)
+    document_url: str | None = None
+    status: str = Field(default="approved", pattern="^(approved|pending)$")
+    remarks: str | None = None
+
+    @model_validator(mode="after")
+    def valid_range(self):
+        if self.end_date < self.start_date:
+            raise ValueError("Leave end date must be on or after start date.")
+        if (self.end_date - self.start_date).days > 365:
+            raise ValueError("A leave request cannot exceed one year.")
+        return self
+
+
+class LeaveReviewRequest(BaseModel):
+    action: str = Field(pattern="^(approve|reject)$")
+    review_remarks: str | None = Field(default=None, max_length=2000)
 
 
 class LeaveTypeCreate(BaseModel):
@@ -1227,6 +1253,118 @@ def _additional_lecture_payload(item: models.AdditionalLectureRequest) -> dict:
         "reviewed_at": item.reviewed_at,
         "review_remarks": item.review_remarks,
         "created_at": item.created_at,
+    }
+
+
+def _ensure_default_leave_types(db: Session, college_id: int):
+    defaults = [
+        {"name": "Casual Leave", "code": "CL", "max_days_per_year": 12, "is_paid": True, "requires_document": False},
+        {"name": "Medical / Sick Leave", "code": "ML", "max_days_per_year": 10, "is_paid": True, "requires_document": True},
+        {"name": "Academic Duty / Conference Leave", "code": "DL", "max_days_per_year": 15, "is_paid": True, "requires_document": False},
+        {"name": "Emergency Leave", "code": "EL", "max_days_per_year": 5, "is_paid": True, "requires_document": False},
+        {"name": "Compensatory Off", "code": "CO", "max_days_per_year": 8, "is_paid": True, "requires_document": False},
+        {"name": "Leave Without Pay", "code": "LWP", "max_days_per_year": 60, "is_paid": False, "requires_document": False},
+    ]
+    for d in defaults:
+        exists = (
+            db.query(models.LeaveType)
+            .filter(
+                models.LeaveType.college_id == college_id,
+                func.upper(models.LeaveType.code) == d["code"],
+            )
+            .first()
+        )
+        if not exists:
+            db.add(
+                models.LeaveType(
+                    college_id=college_id,
+                    name=d["name"],
+                    code=d["code"],
+                    max_days_per_year=d["max_days_per_year"],
+                    is_paid=d["is_paid"],
+                    requires_document=d["requires_document"],
+                    is_active=True,
+                )
+            )
+    db.commit()
+
+
+def _get_affected_lectures_for_leave(db: Session, application: models.LeaveApplication) -> list[dict]:
+    lectures = (
+        db.query(models.WeeklyLecture)
+        .filter(
+            models.WeeklyLecture.user_id == application.user_id,
+            models.WeeklyLecture.college_id == application.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+        )
+        .all()
+    )
+    if not lectures:
+        return []
+
+    lectures_by_day: dict[int, list[models.WeeklyLecture]] = {}
+    for lec in lectures:
+        lectures_by_day.setdefault(lec.day_of_week, []).append(lec)
+
+    affected = []
+    delta = (application.end_date - application.start_date).days
+    for i in range(delta + 1):
+        cur_date = application.start_date + timedelta(days=i)
+        day_w = cur_date.weekday()
+        day_lectures = lectures_by_day.get(day_w, [])
+        for l in day_lectures:
+            st = l.start_time.strftime("%H:%M") if hasattr(l.start_time, "strftime") else str(l.start_time)[:5]
+            et = l.end_time.strftime("%H:%M") if hasattr(l.end_time, "strftime") else str(l.end_time)[:5]
+            day_name = WEEKDAY_NAMES[l.day_of_week] if 0 <= l.day_of_week < len(WEEKDAY_NAMES) else f"Day {l.day_of_week}"
+            sub_fac = l.substitute_faculty
+            affected.append({
+                "lecture_id": l.id,
+                "date": cur_date.isoformat(),
+                "day_name": day_name,
+                "subject": l.subject,
+                "course_name": l.course_name,
+                "room": l.room,
+                "start_time": st,
+                "end_time": et,
+                "lecture_type": l.lecture_type or "Theory",
+                "substitute_faculty_id": l.substitute_faculty_id,
+                "substitute_faculty_name": sub_fac.full_name if sub_fac else None,
+            })
+    return affected
+
+
+def _leave_application_payload(app: models.LeaveApplication, affected_count: int | None = None) -> dict:
+    emp = app.user
+    lt = app.leave_type
+    rev = app.reviewer
+    dept = emp.department if emp else None
+
+    stat = app.status.value if hasattr(app.status, "value") else str(app.status)
+
+    return {
+        "id": app.id,
+        "faculty_id": app.user_id,
+        "faculty_name": emp.full_name if emp else "Unknown",
+        "employee_id": emp.employee_id if emp else "",
+        "faculty_email": emp.email if emp else "",
+        "department_id": emp.department_id if emp else None,
+        "department_name": dept.name if dept else None,
+        "leave_type_id": app.leave_type_id,
+        "leave_type_name": lt.name if lt else "General Leave",
+        "leave_type_code": lt.code if lt else "GL",
+        "is_paid": lt.is_paid if lt else True,
+        "start_date": app.start_date.isoformat() if hasattr(app.start_date, "isoformat") else str(app.start_date),
+        "end_date": app.end_date.isoformat() if hasattr(app.end_date, "isoformat") else str(app.end_date),
+        "total_days": app.total_days or 1,
+        "reason": app.reason,
+        "document_url": app.document_url,
+        "status": stat,
+        "reviewed_by_id": app.reviewed_by,
+        "reviewed_by_name": rev.full_name if rev else None,
+        "reviewed_at": app.reviewed_at.isoformat() if app.reviewed_at else None,
+        "review_remarks": app.review_remarks,
+        "affected_lectures_count": affected_count if affected_count is not None else 0,
+        "created_at": app.created_at.isoformat() if app.created_at else None,
     }
 
 
@@ -6975,11 +7113,18 @@ def create_app() -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="attendance-{report_date.isoformat()}.csv"'},
         )
 
+    # =========================================================================
+    # PHASE 9: LEAVE MANAGEMENT ENDPOINTS
+    # =========================================================================
+
+    @app.get("/leave-types")
     @app.get("/leave/types")
+    @app.get("/admin/leave-types")
     def list_leave_types(
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
+        _ensure_default_leave_types(db, user.college_id)
         leave_types = (
             db.query(models.LeaveType)
             .filter(
@@ -7004,7 +7149,7 @@ def create_app() -> FastAPI:
     @app.post("/admin/leave-types", status_code=status.HTTP_201_CREATED)
     def create_leave_type(
         payload: LeaveTypeCreate,
-        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN)),
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
         db: Session = Depends(get_db),
     ):
         code = payload.code.strip().upper()
@@ -7032,8 +7177,285 @@ def create_app() -> FastAPI:
         db.refresh(leave_type)
         return {"id": leave_type.id, "name": leave_type.name, "code": leave_type.code}
 
+    @app.get("/admin/leaves")
+    def list_admin_leaves(
+        search: str | None = None,
+        status_filter: str | None = None,
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        leave_type_id: int | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        _ensure_default_leave_types(db, admin.college_id)
+        query = db.query(models.LeaveApplication).filter(
+            models.LeaveApplication.college_id == admin.college_id
+        )
+
+        if faculty_id:
+            query = query.filter(models.LeaveApplication.user_id == faculty_id)
+
+        if leave_type_id:
+            query = query.filter(models.LeaveApplication.leave_type_id == leave_type_id)
+
+        if status_filter and status_filter.lower() != "all":
+            query = query.filter(models.LeaveApplication.status == status_filter.lower())
+
+        if start_date:
+            query = query.filter(models.LeaveApplication.end_date >= start_date)
+
+        if end_date:
+            query = query.filter(models.LeaveApplication.start_date <= end_date)
+
+        if department_id or search:
+            query = query.join(models.User, models.LeaveApplication.user_id == models.User.id)
+            if department_id:
+                query = query.filter(models.User.department_id == department_id)
+            if search:
+                term = f"%{search.strip()}%"
+                query = query.filter(
+                    or_(
+                        models.User.full_name.ilike(term),
+                        models.User.email.ilike(term),
+                        models.User.employee_id.ilike(term),
+                        models.LeaveApplication.reason.ilike(term),
+                    )
+                )
+
+        rows = query.order_by(models.LeaveApplication.created_at.desc()).limit(1000).all()
+
+        # Compute college-wide KPIs
+        all_college_leaves = (
+            db.query(models.LeaveApplication)
+            .filter(models.LeaveApplication.college_id == admin.college_id)
+            .all()
+        )
+        total_reqs = len(all_college_leaves)
+        pending_reqs = sum(1 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "pending")
+        approved_reqs = sum(1 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "approved")
+        rejected_reqs = sum(1 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "rejected")
+        total_days_approved = sum(l.total_days or 0 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "approved")
+
+        # Map affected lectures for each row
+        items_payload = []
+        affected_total = 0
+        for l in rows:
+            aff_lectures = _get_affected_lectures_for_leave(db, l)
+            aff_count = len(aff_lectures)
+            stat_val = l.status.value if hasattr(l.status, 'value') else str(l.status)
+            if stat_val in ("pending", "approved"):
+                affected_total += aff_count
+            items_payload.append(_leave_application_payload(l, aff_count))
+
+        return {
+            "items": items_payload,
+            "kpis": {
+                "total_requests": total_reqs,
+                "pending_requests": pending_reqs,
+                "approved_requests": approved_reqs,
+                "rejected_requests": rejected_reqs,
+                "total_days_approved": total_days_approved,
+                "affected_lectures_total": affected_total,
+            },
+        }
+
+    @app.get("/admin/leaves/{leave_id}/affected-lectures")
+    def get_leave_affected_lectures(
+        leave_id: int,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        leave = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.id == leave_id,
+                models.LeaveApplication.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not leave:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave application not found.")
+
+        affected = _get_affected_lectures_for_leave(db, leave)
+        return {
+            "leave_id": leave.id,
+            "faculty_name": leave.user.full_name if leave.user else "Unknown",
+            "start_date": leave.start_date.isoformat(),
+            "end_date": leave.end_date.isoformat(),
+            "affected_count": len(affected),
+            "affected_lectures": affected,
+        }
+
+    @app.post("/admin/leaves", status_code=status.HTTP_201_CREATED)
+    def create_admin_leave(
+        payload: AdminLeaveCreate,
+        request: Request,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        fac = (
+            db.query(models.User)
+            .filter(
+                models.User.id == payload.faculty_id,
+                models.User.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not fac:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Faculty member not found in this college.")
+
+        lt = (
+            db.query(models.LeaveType)
+            .filter(
+                models.LeaveType.id == payload.leave_type_id,
+                models.LeaveType.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not lt:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave type not found.")
+
+        total_days = max(1, (payload.end_date - payload.start_date).days + 1)
+        leave_status = models.LeaveStatus.APPROVED if payload.status == "approved" else models.LeaveStatus.PENDING
+
+        leave = models.LeaveApplication(
+            user_id=fac.id,
+            college_id=admin.college_id,
+            leave_type_id=lt.id,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+            total_days=total_days,
+            reason=payload.reason.strip(),
+            document_url=payload.document_url.strip() if payload.document_url else None,
+            status=leave_status,
+            reviewed_by=admin.id if leave_status == models.LeaveStatus.APPROVED else None,
+            reviewed_at=_utcnow() if leave_status == models.LeaveStatus.APPROVED else None,
+            review_remarks=payload.remarks.strip() if payload.remarks else ("Directly registered by admin." if leave_status == models.LeaveStatus.APPROVED else None),
+        )
+        db.add(leave)
+        db.flush()
+
+        db.add(
+            models.Notification(
+                user_id=fac.id,
+                college_id=admin.college_id,
+                title="Leave registered by administration",
+                message=f"Leave application for {payload.start_date} to {payload.end_date} has been registered ({leave_status.value}).",
+                type="info",
+            )
+        )
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="leave.admin_created",
+                resource_type="leave_application",
+                resource_id=leave.id,
+                new_value={"faculty_id": fac.id, "status": leave_status.value, "total_days": total_days},
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        db.refresh(leave)
+
+        aff_count = len(_get_affected_lectures_for_leave(db, leave))
+        return _leave_application_payload(leave, aff_count)
+
+    @app.post("/admin/leaves/{leave_id}/review")
+    def review_admin_leave(
+        leave_id: int,
+        payload: LeaveReviewRequest,
+        request: Request,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        leave = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.id == leave_id,
+                models.LeaveApplication.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not leave:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave application not found.")
+
+        new_status = models.LeaveStatus.APPROVED if payload.action == "approve" else models.LeaveStatus.REJECTED
+        leave.status = new_status
+        leave.reviewed_by = admin.id
+        leave.reviewed_at = _utcnow()
+        leave.review_remarks = payload.review_remarks.strip() if payload.review_remarks else None
+
+        db.add(
+            models.Notification(
+                user_id=leave.user_id,
+                college_id=admin.college_id,
+                title="Leave Application Decision",
+                message=(
+                    f"Your leave application ({leave.start_date} to {leave.end_date}) was approved."
+                    if payload.action == "approve"
+                    else f"Your leave application was rejected: {leave.review_remarks or 'No reason provided.'}"
+                ),
+                type="success" if payload.action == "approve" else "warning",
+            )
+        )
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="leave.reviewed",
+                resource_type="leave_application",
+                resource_id=leave.id,
+                new_value={"action": payload.action, "remarks": leave.review_remarks},
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        db.refresh(leave)
+
+        aff_count = len(_get_affected_lectures_for_leave(db, leave))
+        return _leave_application_payload(leave, aff_count)
+
+    @app.delete("/admin/leaves/{leave_id}")
+    @app.post("/admin/leaves/{leave_id}/cancel")
+    def delete_or_cancel_admin_leave(
+        leave_id: int,
+        request: Request,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        leave = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.id == leave_id,
+                models.LeaveApplication.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not leave:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave application not found.")
+
+        leave.status = models.LeaveStatus.CANCELLED
+        leave.updated_at = _utcnow()
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="leave.cancelled_by_admin",
+                resource_type="leave_application",
+                resource_id=leave.id,
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        return {"message": "Leave application cancelled successfully."}
+
+    # Faculty Leave Endpoints
+    @app.post("/leaves", status_code=status.HTTP_201_CREATED)
     @app.post("/leave/applications", status_code=status.HTTP_201_CREATED)
-    def apply_for_leave(
+    def submit_leave_application_faculty(
         payload: LeaveApplicationCreate,
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
@@ -7047,13 +7469,9 @@ def create_app() -> FastAPI:
             )
             .first()
         )
-        if leave_type is None:
+        if not leave_type:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave type not found.")
-        if leave_type.requires_document:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="This leave type requires supporting documents, but secure document upload is not configured.",
-            )
+
         overlapping = (
             db.query(models.LeaveApplication.id)
             .filter(
@@ -7065,45 +7483,12 @@ def create_app() -> FastAPI:
             .first()
         )
         if overlapping:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This leave period overlaps another pending or approved request.")
-
-        total_days = _count_leave_days(db, user.college_id, payload.start_date, payload.end_date)
-        if total_days == 0:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The selected leave period contains no working days.")
-        current_year = payload.start_date.year
-        last_year = payload.end_date.year
-        while current_year <= last_year:
-            year_start = date(current_year, 1, 1)
-            year_end = date(current_year, 12, 31)
-            requested_start = max(payload.start_date, year_start)
-            requested_end = min(payload.end_date, year_end)
-            requested_days = _count_leave_days(db, user.college_id, requested_start, requested_end)
-            used_days = 0
-            existing_applications = (
-                db.query(models.LeaveApplication)
-                .filter(
-                    models.LeaveApplication.user_id == user.id,
-                    models.LeaveApplication.leave_type_id == leave_type.id,
-                    models.LeaveApplication.status.in_((models.LeaveStatus.PENDING, models.LeaveStatus.APPROVED)),
-                    models.LeaveApplication.start_date <= year_end,
-                    models.LeaveApplication.end_date >= year_start,
-                )
-                .all()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="You already have a pending or approved leave request overlapping these dates.",
             )
-            for existing in existing_applications:
-                used_days += _count_leave_days(
-                    db,
-                    user.college_id,
-                    max(existing.start_date, year_start),
-                    min(existing.end_date, year_end),
-                )
-            if used_days + requested_days > leave_type.max_days_per_year:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Requested leave exceeds the {leave_type.name} balance for {current_year}.",
-                )
-            current_year += 1
 
+        total_days = max(1, (payload.end_date - payload.start_date).days + 1)
         application = models.LeaveApplication(
             user_id=user.id,
             college_id=user.college_id,
@@ -7112,149 +7497,81 @@ def create_app() -> FastAPI:
             end_date=payload.end_date,
             total_days=total_days,
             reason=payload.reason.strip(),
+            document_url=payload.document_url.strip() if payload.document_url else None,
             status=models.LeaveStatus.PENDING,
         )
         db.add(application)
         db.flush()
-        reviewers = db.query(models.User).filter(
+
+        admins = db.query(models.User).filter(
             models.User.college_id == user.college_id,
             models.User.is_active.is_(True),
-            models.User.role == models.UserRole.SUPER_ADMIN,
-        )
-        if user.department_id is not None:
-            reviewers = reviewers.union(
-                db.query(models.User).filter(
-                    models.User.college_id == user.college_id,
-                    models.User.department_id == user.department_id,
-                    models.User.role == models.UserRole.HOD,
-                    models.User.is_active.is_(True),
-                )
-            )
-        for reviewer in reviewers.all():
+            models.User.role.in_(ADMIN_ROLES),
+        ).all()
+        for a in admins:
             db.add(
                 models.Notification(
-                    user_id=reviewer.id,
+                    user_id=a.id,
                     college_id=user.college_id,
-                    title="New leave application",
-                    message=f"{user.full_name} submitted a leave request for {total_days} working day(s).",
+                    title="New Leave Application",
+                    message=f"{user.full_name} applied for {leave_type.name} ({total_days} days).",
                     type="info",
-                    action_url="/admin/leave",
                 )
             )
         db.commit()
-        return {
-            "id": application.id,
-            "status": application.status.value,
-            "total_days": application.total_days,
-        }
+        db.refresh(application)
+
+        aff_count = len(_get_affected_lectures_for_leave(db, application))
+        return _leave_application_payload(application, aff_count)
+
+    @app.get("/leaves/mine")
+    def get_my_leaves(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        rows = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.user_id == user.id,
+                models.LeaveApplication.college_id == user.college_id,
+            )
+            .order_by(models.LeaveApplication.created_at.desc())
+            .all()
+        )
+        return [_leave_application_payload(a, len(_get_affected_lectures_for_leave(db, a))) for a in rows]
 
     @app.get("/leave/applications")
-    def list_leave_applications(
+    def legacy_list_leave_applications(
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
         query = (
-            db.query(models.LeaveApplication, models.User, models.LeaveType)
-            .join(models.User, models.User.id == models.LeaveApplication.user_id)
-            .join(models.LeaveType, models.LeaveType.id == models.LeaveApplication.leave_type_id)
+            db.query(models.LeaveApplication)
             .filter(models.LeaveApplication.college_id == user.college_id)
         )
-        if user.role == models.UserRole.SUPER_ADMIN:
-            pass
-        elif user.role == models.UserRole.HOD:
-            query = query.filter(models.User.department_id == user.department_id)
-        else:
+        if user.role not in ADMIN_ROLES:
             query = query.filter(models.LeaveApplication.user_id == user.id)
         rows = query.order_by(models.LeaveApplication.created_at.desc()).limit(500).all()
-        return [
-            {
-                "id": application.id,
-                "employee": {"id": employee.id, "name": employee.full_name, "employee_id": employee.employee_id},
-                "leave_type": {"id": leave_type.id, "name": leave_type.name},
-                "start_date": application.start_date,
-                "end_date": application.end_date,
-                "total_days": application.total_days,
-                "reason": application.reason,
-                "status": application.status.value,
-                "reviewed_at": application.reviewed_at,
-                "review_remarks": application.review_remarks,
-                "created_at": application.created_at,
-            }
-            for application, employee, leave_type in rows
-        ]
+        return [_leave_application_payload(a, len(_get_affected_lectures_for_leave(db, a))) for a in rows]
 
     @app.post("/leave/applications/{application_id}/review")
-    def review_leave_application(
+    def legacy_review_leave_application(
         application_id: int,
         payload: LeaveReview,
         request: Request,
-        admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
         db: Session = Depends(get_db),
     ):
-        application = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.id == application_id,
-                models.LeaveApplication.college_id == admin.college_id,
-                models.LeaveApplication.status == models.LeaveStatus.PENDING,
-            )
-            .with_for_update()
-            .first()
+        return review_admin_leave(
+            leave_id=application_id,
+            payload=LeaveReviewRequest(action="approve" if payload.approved else "reject", review_remarks=payload.remarks),
+            request=request,
+            admin=admin,
+            db=db,
         )
-        if application is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
-        employee = db.query(models.User).filter(models.User.id == application.user_id).first()
-        if employee is None or not _user_can_review(admin, employee) or employee.id == admin.id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
-
-        new_status = models.LeaveStatus.APPROVED if payload.approved else models.LeaveStatus.REJECTED
-        application.status = new_status
-        application.reviewed_by = admin.id
-        application.reviewed_at = _utcnow()
-        application.review_remarks = (payload.remarks or "").strip() or None
-        if payload.approved:
-            overlap = (
-                db.query(models.LeaveApplication.id)
-                .filter(
-                    models.LeaveApplication.id != application.id,
-                    models.LeaveApplication.user_id == employee.id,
-                    models.LeaveApplication.status == models.LeaveStatus.APPROVED,
-                    models.LeaveApplication.start_date <= application.end_date,
-                    models.LeaveApplication.end_date >= application.start_date,
-                )
-                .first()
-            )
-            if overlap:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The requested dates overlap another approved leave.")
-        db.add(
-            models.AuditLog(
-                college_id=admin.college_id,
-                user_id=admin.id,
-                action="leave.application_reviewed",
-                resource_type="leave_application",
-                resource_id=application.id,
-                new_value={"status": new_status.value, "remarks": application.review_remarks},
-                ip_address=request.client.host if request.client else None,
-            )
-        )
-        db.add(
-            models.Notification(
-                user_id=employee.id,
-                college_id=admin.college_id,
-                title="Leave application reviewed",
-                message=(
-                    "Your leave application was approved."
-                    if payload.approved
-                    else f"Your leave application was rejected. {application.review_remarks or ''}".strip()
-                ),
-                type="success" if payload.approved else "warning",
-            )
-        )
-        db.commit()
-        return {"id": application.id, "status": application.status.value}
 
     @app.post("/leave/applications/{application_id}/cancel")
-    def cancel_leave_application(
+    def legacy_cancel_leave_application(
         application_id: int,
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
@@ -7267,10 +7584,9 @@ def create_app() -> FastAPI:
                 models.LeaveApplication.college_id == user.college_id,
                 models.LeaveApplication.status == models.LeaveStatus.PENDING,
             )
-            .with_for_update()
             .first()
         )
-        if application is None:
+        if not application:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
         application.status = models.LeaveStatus.CANCELLED
         application.updated_at = _utcnow()

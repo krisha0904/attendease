@@ -563,6 +563,8 @@ class LeaveApplication(Base):
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     user = relationship("User", back_populates="leave_applications", foreign_keys=[user_id])
+    leave_type = relationship("LeaveType", foreign_keys=[leave_type_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
 
 
 # ===========================================================================
