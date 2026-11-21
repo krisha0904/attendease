@@ -2,7 +2,7 @@ import React, { useState } from 'react'
 import {
   Activity, Building2,
   CheckCircle2, Clock3, CreditCard, Database, Download,
-  FileSpreadsheet, Fingerprint, Megaphone,
+  FileSpreadsheet, Fingerprint,
   ScrollText, Settings, ShieldAlert,
   ShieldCheck, UserPlus, Users
 } from 'lucide-react'
@@ -21,6 +21,7 @@ import { AttendanceCorrectionsPage } from './AttendanceCorrectionsPage'
 import { AvailabilityManagementPage } from './AvailabilityManagementPage'
 import { LeaveManagementPage } from './LeaveManagementPage'
 import { SubstituteManagementPage } from './SubstituteManagementPage'
+import { NotificationHubPage } from './NotificationHubPage'
 
 interface AdminViewProps {
   page: string
@@ -93,26 +94,7 @@ export function AdminViewDispatcher({
       return <SubstituteManagementPage onNavigateToTimetable={() => onNavigate('timetable')} />
 
     case 'notifications':
-      return existingComponents.notifications ? (
-        <AdminPageScaffold
-          title="Notifications & Announcements"
-          eyebrow="INSTITUTION BROADCAST"
-          description="Send individual alerts, department announcements, schedule change alerts, and push updates."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Broadcast announcement')}>
-              <Megaphone size={15} /> Broadcast Announcement
-            </button>
-          }
-        >
-          {existingComponents.notifications}
-        </AdminPageScaffold>
-      ) : (
-        <AdminPageScaffold
-          title="Notifications & Announcements"
-          eyebrow="INSTITUTION BROADCAST"
-          description="Send individual alerts, department announcements, schedule change alerts, and push updates."
-        />
-      )
+      return <NotificationHubPage />
 
     case 'reports':
       return existingComponents.reports ? (

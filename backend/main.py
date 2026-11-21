@@ -226,6 +226,17 @@ class WeeklyLectureConflictCheck(BaseModel):
     exclude_id: int | None = None
 
 
+class AnnouncementCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    message: str = Field(min_length=1, max_length=5000)
+    type: str = Field(default="info", pattern="^(info|warning|urgent|success)$")
+    priority: str = Field(default="normal", pattern="^(normal|high|critical)$")
+    target_role: str | None = None
+    target_department_id: int | None = None
+    action_url: str | None = Field(default=None, max_length=500)
+    expires_at: datetime | None = None
+
+
 class AttendanceManualOverride(BaseModel):
     user_id: int = Field(gt=0)
     date: date
@@ -1430,6 +1441,41 @@ def _substitute_assignment_payload(sub: models.SubstituteAssignment) -> dict:
         "assigned_by_id": sub.assigned_by_id,
         "assigned_by_name": assigner.full_name if assigner else None,
         "lecture": lec_data,
+    }
+
+
+def _notification_payload(n: models.Notification) -> dict:
+    return {
+        "id": n.id,
+        "title": n.title,
+        "message": n.message,
+        "type": n.type or "info",
+        "priority": getattr(n, "priority", "normal") or "normal",
+        "is_read": bool(n.is_read),
+        "read_at": n.read_at.isoformat() if getattr(n, "read_at", None) else None,
+        "action_url": n.action_url,
+        "created_at": n.created_at.isoformat() if n.created_at else None,
+    }
+
+
+def _announcement_payload(a: models.Announcement) -> dict:
+    dept = a.department
+    creator = a.created_by
+    return {
+        "id": a.id,
+        "title": a.title,
+        "message": a.message,
+        "type": a.type or "info",
+        "priority": a.priority or "normal",
+        "target_role": a.target_role or "All Roles",
+        "target_department_id": a.target_department_id,
+        "target_department_name": dept.name if dept else "All Departments",
+        "action_url": a.action_url,
+        "is_active": a.is_active,
+        "created_by_id": a.created_by_id,
+        "created_by_name": creator.full_name if creator else "System Administrator",
+        "expires_at": a.expires_at.isoformat() if a.expires_at else None,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
     }
 
 
@@ -8139,35 +8185,50 @@ def create_app() -> FastAPI:
         db.refresh(sub)
         return _substitute_assignment_payload(sub)
 
+    # =========================================================================
+    # PHASE 11: REAL-TIME NOTIFICATIONS, ANNOUNCEMENTS & COMMUNICATION HUB
+    # =========================================================================
+
     @app.get("/notifications")
     def list_notifications(
+        filter_type: str | None = None,
         user: models.User = Depends(get_current_user),
         db: Session = Depends(get_db),
     ):
-        notifications = (
+        query = db.query(models.Notification).filter(
+            models.Notification.user_id == user.id,
+            models.Notification.college_id == user.college_id,
+        )
+
+        if filter_type == "unread":
+            query = query.filter(models.Notification.is_read.is_(False))
+        elif filter_type == "urgent":
+            query = query.filter(
+                or_(
+                    models.Notification.type == "urgent",
+                    models.Notification.priority.in_(("high", "critical")),
+                )
+            )
+
+        items = query.order_by(models.Notification.created_at.desc()).limit(200).all()
+
+        unread_count = (
             db.query(models.Notification)
             .filter(
                 models.Notification.user_id == user.id,
                 models.Notification.college_id == user.college_id,
+                models.Notification.is_read.is_(False),
             )
-            .order_by(models.Notification.created_at.desc())
-            .limit(100)
-            .all()
+            .count()
         )
-        return [
-            {
-                "id": item.id,
-                "title": item.title,
-                "message": item.message,
-                "type": item.type,
-                "is_read": item.is_read,
-                "action_url": item.action_url,
-                "created_at": item.created_at,
-            }
-            for item in notifications
-        ]
 
-    @app.post("/notifications/{notification_id}/read", status_code=status.HTTP_204_NO_CONTENT)
+        return {
+            "items": [_notification_payload(n) for n in items],
+            "unread_count": unread_count,
+            "total_count": len(items),
+        }
+
+    @app.post("/notifications/{notification_id}/read")
     def mark_notification_read(
         notification_id: int,
         user: models.User = Depends(get_current_user),
@@ -8182,10 +8243,233 @@ def create_app() -> FastAPI:
             )
             .first()
         )
-        if notification is None:
+        if not notification:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+
         notification.is_read = True
+        notification.read_at = _utcnow()
         db.commit()
+        db.refresh(notification)
+        return _notification_payload(notification)
+
+    @app.post("/notifications/read-all")
+    def mark_all_notifications_read(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        (
+            db.query(models.Notification)
+            .filter(
+                models.Notification.user_id == user.id,
+                models.Notification.college_id == user.college_id,
+                models.Notification.is_read.is_(False),
+            )
+            .update({"is_read": True, "read_at": _utcnow()}, synchronize_session=False)
+        )
+        db.commit()
+        return {"message": "All notifications marked as read."}
+
+    @app.delete("/notifications/{notification_id}")
+    def delete_notification(
+        notification_id: int,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        notification = (
+            db.query(models.Notification)
+            .filter(
+                models.Notification.id == notification_id,
+                models.Notification.user_id == user.id,
+                models.Notification.college_id == user.college_id,
+            )
+            .first()
+        )
+        if not notification:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+
+        db.delete(notification)
+        db.commit()
+        return {"message": "Notification dismissed successfully."}
+
+    @app.get("/admin/announcements")
+    def list_admin_announcements(
+        search: str | None = None,
+        type_filter: str | None = None,
+        priority_filter: str | None = None,
+        department_id: int | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.Announcement).filter(
+            models.Announcement.college_id == admin.college_id
+        )
+
+        if type_filter and type_filter != "all":
+            query = query.filter(models.Announcement.type == type_filter)
+
+        if priority_filter and priority_filter != "all":
+            query = query.filter(models.Announcement.priority == priority_filter)
+
+        if department_id:
+            query = query.filter(models.Announcement.target_department_id == department_id)
+
+        if search:
+            term = f"%{search.strip()}%"
+            query = query.filter(
+                or_(
+                    models.Announcement.title.ilike(term),
+                    models.Announcement.message.ilike(term),
+                )
+            )
+
+        rows = query.order_by(models.Announcement.created_at.desc()).limit(500).all()
+
+        all_college_announcements = (
+            db.query(models.Announcement)
+            .filter(models.Announcement.college_id == admin.college_id)
+            .all()
+        )
+        now = _utcnow()
+        total_announcements = len(all_college_announcements)
+        active_broadcasts = sum(
+            1
+            for a in all_college_announcements
+            if a.is_active and (a.expires_at is None or a.expires_at >= now)
+        )
+        urgent_alerts = sum(
+            1
+            for a in all_college_announcements
+            if a.type == "urgent" or a.priority in ("high", "critical")
+        )
+
+        total_notifications_sent = (
+            db.query(models.Notification)
+            .filter(models.Notification.college_id == admin.college_id)
+            .count()
+        )
+
+        return {
+            "items": [_announcement_payload(a) for a in rows],
+            "kpis": {
+                "total_announcements": total_announcements,
+                "active_broadcasts": active_broadcasts,
+                "urgent_alerts": urgent_alerts,
+                "total_notifications_sent": total_notifications_sent,
+            },
+        }
+
+    @app.post("/admin/announcements", status_code=status.HTTP_201_CREATED)
+    def create_admin_announcement(
+        payload: AnnouncementCreate,
+        request: Request,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        announcement = models.Announcement(
+            college_id=admin.college_id,
+            created_by_id=admin.id,
+            title=payload.title.strip(),
+            message=payload.message.strip(),
+            type=payload.type,
+            priority=payload.priority,
+            target_role=payload.target_role.strip().lower() if payload.target_role and payload.target_role.lower() != "all" else None,
+            target_department_id=payload.target_department_id,
+            action_url=payload.action_url.strip() if payload.action_url else None,
+            expires_at=payload.expires_at,
+            is_active=True,
+        )
+        db.add(announcement)
+        db.flush()
+
+        user_query = db.query(models.User).filter(
+            models.User.college_id == admin.college_id,
+            models.User.is_active.is_(True),
+        )
+        if announcement.target_role:
+            user_query = user_query.filter(models.User.role == announcement.target_role)
+        if announcement.target_department_id:
+            user_query = user_query.filter(models.User.department_id == announcement.target_department_id)
+
+        target_users = user_query.all()
+        for u in target_users:
+            db.add(
+                models.Notification(
+                    user_id=u.id,
+                    college_id=admin.college_id,
+                    title=announcement.title,
+                    message=announcement.message,
+                    type=announcement.type,
+                    priority=announcement.priority,
+                    action_url=announcement.action_url,
+                    is_read=False,
+                )
+            )
+
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="announcement.broadcast",
+                resource_type="announcement",
+                resource_id=announcement.id,
+                new_value={"recipients_count": len(target_users), "title": announcement.title},
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        db.refresh(announcement)
+
+        return _announcement_payload(announcement)
+
+    @app.delete("/admin/announcements/{announcement_id}")
+    def deactivate_announcement(
+        announcement_id: int,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        announcement = (
+            db.query(models.Announcement)
+            .filter(
+                models.Announcement.id == announcement_id,
+                models.Announcement.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Announcement not found.")
+
+        announcement.is_active = False
+        db.commit()
+        return {"message": "Announcement deactivated successfully."}
+
+    @app.get("/announcements/active")
+    def get_active_announcements_for_user(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        now = _utcnow()
+        query = (
+            db.query(models.Announcement)
+            .filter(
+                models.Announcement.college_id == user.college_id,
+                models.Announcement.is_active.is_(True),
+                or_(
+                    models.Announcement.expires_at.is_(None),
+                    models.Announcement.expires_at >= now,
+                ),
+                or_(
+                    models.Announcement.target_role.is_(None),
+                    models.Announcement.target_role == user.role,
+                ),
+                or_(
+                    models.Announcement.target_department_id.is_(None),
+                    models.Announcement.target_department_id == user.department_id,
+                ),
+            )
+            .order_by(models.Announcement.created_at.desc())
+            .limit(20)
+        )
+        return [_announcement_payload(a) for a in query.all()]
 
     # =========================================================================
     # PHASE 4: ACADEMIC MANAGEMENT (DEPARTMENTS, COURSES, SUBJECTS, AY, CLASSROOMS, HOLIDAYS)

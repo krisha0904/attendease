@@ -597,12 +597,35 @@ class Notification(Base):
     college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
     title = Column(String(255), nullable=False)
     message = Column(Text, nullable=False)
-    type = Column(String(50), default="info")  # info, warning, success, error
+    type = Column(String(50), default="info")  # info, warning, success, error, urgent
+    priority = Column(String(20), default="normal")  # normal, high, critical
     is_read = Column(Boolean, default=False)
+    read_at = Column(DateTime, nullable=True)
     action_url = Column(String(500))
     created_at = Column(DateTime, default=utcnow)
 
     user = relationship("User", back_populates="notifications")
+
+
+class Announcement(Base):
+    __tablename__ = "announcements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    type = Column(String(50), default="info")  # info, warning, urgent, success
+    priority = Column(String(20), default="normal")  # normal, high, critical
+    target_role = Column(String(50), nullable=True)  # None = all, or faculty, hod, etc.
+    target_department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"), nullable=True)
+    action_url = Column(String(500), nullable=True)
+    is_active = Column(Boolean, default=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utcnow)
+
+    created_by = relationship("User", foreign_keys=[created_by_id])
+    department = relationship("Department", foreign_keys=[target_department_id])
 
 
 class WeeklyLecture(Base):
