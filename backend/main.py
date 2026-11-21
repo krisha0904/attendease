@@ -204,6 +204,18 @@ class WeeklyLectureSubstituteUpdate(BaseModel):
     substitute_faculty_id: int | None = None
 
 
+class SubstituteAssignCreate(BaseModel):
+    lecture_id: int = Field(gt=0)
+    substitute_faculty_id: int = Field(gt=0)
+    lecture_date: date
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
+class SubstituteResponse(BaseModel):
+    action: str = Field(pattern="^(accept|decline)$")
+    remarks: str | None = Field(default=None, max_length=1000)
+
+
 class WeeklyLectureConflictCheck(BaseModel):
     user_id: int = Field(gt=0)
     classroom_id: int | None = None
@@ -1365,6 +1377,59 @@ def _leave_application_payload(app: models.LeaveApplication, affected_count: int
         "review_remarks": app.review_remarks,
         "affected_lectures_count": affected_count if affected_count is not None else 0,
         "created_at": app.created_at.isoformat() if app.created_at else None,
+    }
+
+
+def _substitute_assignment_payload(sub: models.SubstituteAssignment) -> dict:
+    lec = sub.lecture
+    orig = sub.original_faculty
+    sub_fac = sub.substitute_faculty
+    assigner = sub.assigned_by
+
+    orig_dept = orig.department if orig else None
+    sub_dept = sub_fac.department if sub_fac else None
+
+    lec_data = None
+    if lec:
+        st = lec.start_time.strftime("%H:%M") if hasattr(lec.start_time, "strftime") else str(lec.start_time)[:5]
+        et = lec.end_time.strftime("%H:%M") if hasattr(lec.end_time, "strftime") else str(lec.end_time)[:5]
+        day_name = WEEKDAY_NAMES[lec.day_of_week] if 0 <= lec.day_of_week < len(WEEKDAY_NAMES) else f"Day {lec.day_of_week}"
+        room_name = lec.room
+        if lec.classroom:
+            room_name = f"{lec.classroom.building} - {lec.classroom.room_number}" if lec.classroom.building else lec.classroom.room_number
+
+        lec_data = {
+            "id": lec.id,
+            "subject": lec.subject,
+            "course_name": lec.course_name,
+            "room": room_name,
+            "day_of_week": lec.day_of_week,
+            "day_name": day_name,
+            "start_time": st,
+            "end_time": et,
+            "lecture_type": lec.lecture_type or "Theory",
+        }
+
+    return {
+        "id": sub.id,
+        "lecture_id": sub.lecture_id,
+        "lecture_date": sub.lecture_date.isoformat() if hasattr(sub.lecture_date, "isoformat") else str(sub.lecture_date),
+        "status": sub.status or "pending",
+        "remarks": sub.remarks,
+        "response_remarks": sub.response_remarks,
+        "acknowledgement_at": sub.acknowledgement_at.isoformat() if sub.acknowledgement_at else None,
+        "created_at": sub.created_at.isoformat() if sub.created_at else None,
+        "original_faculty_id": sub.original_faculty_id,
+        "original_faculty_name": orig.full_name if orig else "Unknown",
+        "original_employee_id": orig.employee_id if orig else "",
+        "original_department": orig_dept.name if orig_dept else None,
+        "substitute_faculty_id": sub.substitute_faculty_id,
+        "substitute_faculty_name": sub_fac.full_name if sub_fac else "Unknown",
+        "substitute_employee_id": sub_fac.employee_id if sub_fac else "",
+        "substitute_department": sub_dept.name if sub_dept else None,
+        "assigned_by_id": sub.assigned_by_id,
+        "assigned_by_name": assigner.full_name if assigner else None,
+        "lecture": lec_data,
     }
 
 
@@ -7592,6 +7657,487 @@ def create_app() -> FastAPI:
         application.updated_at = _utcnow()
         db.commit()
         return {"id": application.id, "status": application.status.value}
+
+    # =========================================================================
+    # PHASE 10: SUBSTITUTE FACULTY MANAGEMENT & REPLACEMENT WORKFLOWS
+    # =========================================================================
+
+    @app.get("/admin/substitutes")
+    def list_substitute_assignments(
+        search: str | None = None,
+        status_filter: str | None = None,
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        date: date | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(models.SubstituteAssignment).filter(
+            models.SubstituteAssignment.college_id == admin.college_id
+        )
+
+        if status_filter and status_filter.lower() != "all":
+            query = query.filter(models.SubstituteAssignment.status == status_filter.lower())
+
+        if date:
+            query = query.filter(models.SubstituteAssignment.lecture_date == date)
+
+        if faculty_id:
+            query = query.filter(
+                or_(
+                    models.SubstituteAssignment.original_faculty_id == faculty_id,
+                    models.SubstituteAssignment.substitute_faculty_id == faculty_id,
+                )
+            )
+
+        if department_id:
+            query = query.join(
+                models.WeeklyLecture,
+                models.SubstituteAssignment.lecture_id == models.WeeklyLecture.id,
+            ).filter(models.WeeklyLecture.department_id == department_id)
+
+        if search:
+            term = f"%{search.strip()}%"
+            query = (
+                query.join(
+                    models.User,
+                    models.SubstituteAssignment.substitute_faculty_id == models.User.id,
+                )
+                .join(
+                    models.WeeklyLecture,
+                    models.SubstituteAssignment.lecture_id == models.WeeklyLecture.id,
+                )
+                .filter(
+                    or_(
+                        models.User.full_name.ilike(term),
+                        models.User.employee_id.ilike(term),
+                        models.WeeklyLecture.subject.ilike(term),
+                        models.WeeklyLecture.course_name.ilike(term),
+                        models.SubstituteAssignment.remarks.ilike(term),
+                    )
+                )
+            )
+
+        rows = query.order_by(models.SubstituteAssignment.created_at.desc()).limit(1000).all()
+
+        # Compute college-wide KPIs
+        all_subs = (
+            db.query(models.SubstituteAssignment)
+            .filter(models.SubstituteAssignment.college_id == admin.college_id)
+            .all()
+        )
+        total_substitutions = len(all_subs)
+        pending_acknowledgements = sum(1 for s in all_subs if s.status == "pending")
+        active_substitutions = sum(1 for s in all_subs if s.status in ("accepted", "assigned"))
+        declined_count = sum(1 for s in all_subs if s.status == "declined")
+
+        # Uncovered lectures across active/approved leaves
+        today = _utcnow().date()
+        approved_leaves = (
+            db.query(models.LeaveApplication)
+            .filter(
+                models.LeaveApplication.college_id == admin.college_id,
+                models.LeaveApplication.status == models.LeaveStatus.APPROVED,
+                models.LeaveApplication.end_date >= today,
+            )
+            .all()
+        )
+        uncovered_count = 0
+        for l in approved_leaves:
+            aff = _get_affected_lectures_for_leave(db, l)
+            for lec in aff:
+                if not lec.get("substitute_faculty_id"):
+                    uncovered_count += 1
+
+        return {
+            "items": [_substitute_assignment_payload(s) for s in rows],
+            "kpis": {
+                "total_substitutions": total_substitutions,
+                "pending_acknowledgements": pending_acknowledgements,
+                "active_substitutions": active_substitutions,
+                "declined_count": declined_count,
+                "uncovered_leaves_count": uncovered_count,
+            },
+        }
+
+    @app.get("/admin/substitutes/eligible-faculty")
+    def get_eligible_substitute_faculty(
+        lecture_id: int,
+        lecture_date: date | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        lecture = (
+            db.query(models.WeeklyLecture)
+            .filter(
+                models.WeeklyLecture.id == lecture_id,
+                models.WeeklyLecture.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not lecture:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekly lecture not found.")
+
+        target_dt = lecture_date
+        if not target_dt:
+            today = _utcnow().date()
+            diff = (lecture.day_of_week - today.weekday()) % 7
+            target_dt = today + timedelta(days=diff)
+
+        faculty_list = (
+            db.query(models.User)
+            .filter(
+                models.User.college_id == admin.college_id,
+                models.User.is_active.is_(True),
+                models.User.id != lecture.user_id,
+                models.User.role.in_([models.UserRole.FACULTY, models.UserRole.HOD]),
+            )
+            .all()
+        )
+
+        candidates = []
+        for fac in faculty_list:
+            conflict_reason = None
+            is_eligible = True
+            is_same_dept = (fac.department_id == lecture.department_id)
+
+            # 1. Timetable Conflict
+            time_conflict = (
+                db.query(models.WeeklyLecture)
+                .filter(
+                    models.WeeklyLecture.id != lecture.id,
+                    models.WeeklyLecture.college_id == admin.college_id,
+                    models.WeeklyLecture.is_active.is_(True),
+                    models.WeeklyLecture.day_of_week == lecture.day_of_week,
+                    or_(
+                        models.WeeklyLecture.user_id == fac.id,
+                        models.WeeklyLecture.substitute_faculty_id == fac.id,
+                    ),
+                    models.WeeklyLecture.start_time < lecture.end_time,
+                    models.WeeklyLecture.end_time > lecture.start_time,
+                )
+                .first()
+            )
+            if time_conflict:
+                is_eligible = False
+                st_disp = time_conflict.start_time.strftime('%H:%M') if hasattr(time_conflict.start_time, 'strftime') else str(time_conflict.start_time)[:5]
+                et_disp = time_conflict.end_time.strftime('%H:%M') if hasattr(time_conflict.end_time, 'strftime') else str(time_conflict.end_time)[:5]
+                conflict_reason = f"Schedule Conflict: Already teaching '{time_conflict.subject}' at {st_disp}-{et_disp}"
+
+            # 2. Leave Conflict
+            if is_eligible and target_dt:
+                on_leave = (
+                    db.query(models.LeaveApplication)
+                    .filter(
+                        models.LeaveApplication.user_id == fac.id,
+                        models.LeaveApplication.status == models.LeaveStatus.APPROVED,
+                        models.LeaveApplication.start_date <= target_dt,
+                        models.LeaveApplication.end_date >= target_dt,
+                    )
+                    .first()
+                )
+                if on_leave:
+                    is_eligible = False
+                    conflict_reason = f"On Approved Leave until {on_leave.end_date}"
+
+            # 3. Availability Blackout Window
+            if is_eligible:
+                blackout = (
+                    db.query(models.FacultyAvailability)
+                    .filter(
+                        models.FacultyAvailability.faculty_id == fac.id,
+                        models.FacultyAvailability.day_of_week == lecture.day_of_week,
+                        models.FacultyAvailability.is_available.is_(False),
+                        models.FacultyAvailability.status == "approved",
+                        models.FacultyAvailability.start_time < lecture.end_time,
+                        models.FacultyAvailability.end_time > lecture.start_time,
+                    )
+                    .first()
+                )
+                if blackout:
+                    is_eligible = False
+                    st_b = blackout.start_time.strftime('%H:%M') if hasattr(blackout.start_time, 'strftime') else str(blackout.start_time)[:5]
+                    et_b = blackout.end_time.strftime('%H:%M') if hasattr(blackout.end_time, 'strftime') else str(blackout.end_time)[:5]
+                    conflict_reason = f"Faculty Blackout Period ({st_b}-{et_b})"
+
+            if not is_eligible:
+                match_score = 0
+            elif is_same_dept:
+                match_score = 100
+            else:
+                match_score = 80
+
+            dept_name = fac.department.name if fac.department else "General"
+            candidates.append({
+                "faculty_id": fac.id,
+                "full_name": fac.full_name,
+                "employee_id": fac.employee_id,
+                "email": fac.email,
+                "department_id": fac.department_id,
+                "department_name": dept_name,
+                "is_same_department": is_same_dept,
+                "is_eligible": is_eligible,
+                "conflict_reason": conflict_reason,
+                "match_score": match_score,
+            })
+
+        candidates.sort(key=lambda c: (c["is_eligible"], c["match_score"]), reverse=True)
+
+        st_l = lecture.start_time.strftime('%H:%M') if hasattr(lecture.start_time, 'strftime') else str(lecture.start_time)[:5]
+        et_l = lecture.end_time.strftime('%H:%M') if hasattr(lecture.end_time, 'strftime') else str(lecture.end_time)[:5]
+
+        return {
+            "lecture_id": lecture.id,
+            "subject": lecture.subject,
+            "lecture_date": target_dt.isoformat(),
+            "time_slot": f"{st_l} - {et_l}",
+            "candidates": candidates,
+        }
+
+    @app.post("/admin/substitutes/assign", status_code=status.HTTP_201_CREATED)
+    def assign_substitute_faculty(
+        payload: SubstituteAssignCreate,
+        request: Request,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        lecture = (
+            db.query(models.WeeklyLecture)
+            .filter(
+                models.WeeklyLecture.id == payload.lecture_id,
+                models.WeeklyLecture.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not lecture:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Weekly lecture not found.")
+
+        sub_fac = (
+            db.query(models.User)
+            .filter(
+                models.User.id == payload.substitute_faculty_id,
+                models.User.college_id == admin.college_id,
+                models.User.is_active.is_(True),
+            )
+            .first()
+        )
+        if not sub_fac:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Substitute faculty not found.")
+
+        if sub_fac.id == lecture.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Faculty member cannot be assigned as a substitute for their own lecture.",
+            )
+
+        sub_conflict = (
+            db.query(models.WeeklyLecture)
+            .filter(
+                models.WeeklyLecture.id != lecture.id,
+                models.WeeklyLecture.college_id == admin.college_id,
+                models.WeeklyLecture.is_active.is_(True),
+                models.WeeklyLecture.day_of_week == lecture.day_of_week,
+                or_(
+                    models.WeeklyLecture.user_id == sub_fac.id,
+                    models.WeeklyLecture.substitute_faculty_id == sub_fac.id,
+                ),
+                models.WeeklyLecture.start_time < lecture.end_time,
+                models.WeeklyLecture.end_time > lecture.start_time,
+            )
+            .first()
+        )
+        if sub_conflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflict: {sub_fac.full_name} is already teaching '{sub_conflict.subject}' at this time.",
+            )
+
+        existing = (
+            db.query(models.SubstituteAssignment)
+            .filter(
+                models.SubstituteAssignment.lecture_id == lecture.id,
+                models.SubstituteAssignment.lecture_date == payload.lecture_date,
+                models.SubstituteAssignment.status.in_(("pending", "accepted")),
+            )
+            .first()
+        )
+        if existing:
+            existing.status = "revoked"
+
+        assignment = models.SubstituteAssignment(
+            college_id=admin.college_id,
+            lecture_id=lecture.id,
+            lecture_date=payload.lecture_date,
+            original_faculty_id=lecture.user_id,
+            substitute_faculty_id=sub_fac.id,
+            status="pending",
+            remarks=payload.remarks.strip() if payload.remarks else None,
+            assigned_by_id=admin.id,
+        )
+        db.add(assignment)
+        lecture.substitute_faculty_id = sub_fac.id
+
+        st_str = lecture.start_time.strftime("%H:%M") if hasattr(lecture.start_time, "strftime") else str(lecture.start_time)[:5]
+        et_str = lecture.end_time.strftime("%H:%M") if hasattr(lecture.end_time, "strftime") else str(lecture.end_time)[:5]
+        db.add(
+            models.Notification(
+                user_id=sub_fac.id,
+                college_id=admin.college_id,
+                title="Substitute Lecture Assignment",
+                message=f"You have been assigned to cover '{lecture.subject}' on {payload.lecture_date} ({st_str}-{et_str}). Please acknowledge.",
+                type="info",
+                action_url="/substitutes",
+            )
+        )
+        db.add(
+            models.Notification(
+                user_id=lecture.user_id,
+                college_id=admin.college_id,
+                title="Substitute Assigned for Lecture",
+                message=f"{sub_fac.full_name} has been assigned as substitute for '{lecture.subject}' on {payload.lecture_date}.",
+                type="info",
+            )
+        )
+        db.add(
+            models.AuditLog(
+                college_id=admin.college_id,
+                user_id=admin.id,
+                action="substitute.assigned",
+                resource_type="substitute_assignment",
+                resource_id=assignment.id,
+                new_value={
+                    "lecture_id": lecture.id,
+                    "substitute_faculty_id": sub_fac.id,
+                    "lecture_date": payload.lecture_date.isoformat(),
+                },
+                ip_address=request.client.host if request.client else None,
+            )
+        )
+        db.commit()
+        db.refresh(assignment)
+
+        return _substitute_assignment_payload(assignment)
+
+    @app.post("/admin/substitutes/{sub_id}/acknowledge")
+    def acknowledge_substitute_admin(
+        sub_id: int,
+        payload: SubstituteResponse,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        sub = (
+            db.query(models.SubstituteAssignment)
+            .filter(
+                models.SubstituteAssignment.id == sub_id,
+                models.SubstituteAssignment.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not sub:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Substitute assignment not found.")
+
+        new_status = "accepted" if payload.action == "accept" else "declined"
+        sub.status = new_status
+        sub.acknowledgement_at = _utcnow()
+        sub.response_remarks = payload.remarks.strip() if payload.remarks else None
+
+        if new_status == "declined" and sub.lecture:
+            if sub.lecture.substitute_faculty_id == sub.substitute_faculty_id:
+                sub.lecture.substitute_faculty_id = None
+
+        db.commit()
+        db.refresh(sub)
+        return _substitute_assignment_payload(sub)
+
+    @app.delete("/admin/substitutes/{sub_id}")
+    @app.post("/admin/substitutes/{sub_id}/revoke")
+    def revoke_substitute_assignment(
+        sub_id: int,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        sub = (
+            db.query(models.SubstituteAssignment)
+            .filter(
+                models.SubstituteAssignment.id == sub_id,
+                models.SubstituteAssignment.college_id == admin.college_id,
+            )
+            .first()
+        )
+        if not sub:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Substitute assignment not found.")
+
+        sub.status = "revoked"
+        if sub.lecture and sub.lecture.substitute_faculty_id == sub.substitute_faculty_id:
+            sub.lecture.substitute_faculty_id = None
+
+        db.commit()
+        return {"message": "Substitute assignment revoked successfully."}
+
+    # Faculty self-service substitution endpoints
+    @app.get("/substitutes/mine")
+    def get_my_substitutions(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        rows = (
+            db.query(models.SubstituteAssignment)
+            .filter(
+                models.SubstituteAssignment.substitute_faculty_id == user.id,
+                models.SubstituteAssignment.college_id == user.college_id,
+            )
+            .order_by(models.SubstituteAssignment.lecture_date.desc())
+            .all()
+        )
+        return [_substitute_assignment_payload(s) for s in rows]
+
+    @app.post("/substitutes/{sub_id}/respond")
+    def respond_to_substitution_faculty(
+        sub_id: int,
+        payload: SubstituteResponse,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        sub = (
+            db.query(models.SubstituteAssignment)
+            .filter(
+                models.SubstituteAssignment.id == sub_id,
+                models.SubstituteAssignment.substitute_faculty_id == user.id,
+                models.SubstituteAssignment.college_id == user.college_id,
+            )
+            .first()
+        )
+        if not sub:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Substitution assignment not found.")
+
+        new_status = "accepted" if payload.action == "accept" else "declined"
+        sub.status = new_status
+        sub.acknowledgement_at = _utcnow()
+        sub.response_remarks = payload.remarks.strip() if payload.remarks else None
+
+        if new_status == "declined" and sub.lecture:
+            if sub.lecture.substitute_faculty_id == sub.substitute_faculty_id:
+                sub.lecture.substitute_faculty_id = None
+
+        admins = db.query(models.User).filter(
+            models.User.college_id == user.college_id,
+            models.User.role.in_(ADMIN_ROLES),
+            models.User.is_active.is_(True),
+        ).all()
+        for a in admins:
+            db.add(
+                models.Notification(
+                    user_id=a.id,
+                    college_id=user.college_id,
+                    title="Substitute Response",
+                    message=f"{user.full_name} has {new_status} the substitution assignment for '{sub.lecture.subject if sub.lecture else 'lecture'}'.",
+                    type="info" if new_status == "accepted" else "warning",
+                )
+            )
+
+        db.commit()
+        db.refresh(sub)
+        return _substitute_assignment_payload(sub)
 
     @app.get("/notifications")
     def list_notifications(

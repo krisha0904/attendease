@@ -999,11 +999,14 @@ class SubstituteAssignment(Base):
     status = Column(String(20), default="pending")
     remarks = Column(Text, nullable=True)
     assigned_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    acknowledgement_at = Column(DateTime, nullable=True)
+    response_remarks = Column(Text, nullable=True)
     created_at = Column(DateTime, default=utcnow)
 
     lecture = relationship("WeeklyLecture")
     original_faculty = relationship("User", foreign_keys=[original_faculty_id])
     substitute_faculty = relationship("User", foreign_keys=[substitute_faculty_id])
+    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
 
     __table_args__ = (
         Index("idx_substitute_date_lecture", "college_id", "lecture_date", "lecture_id"),

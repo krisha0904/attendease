@@ -4,7 +4,7 @@ import {
   CheckCircle2, Clock3, CreditCard, Database, Download,
   FileSpreadsheet, Fingerprint, Megaphone,
   ScrollText, Settings, ShieldAlert,
-  ShieldCheck, UserCheck, UserPlus, Users, AlertCircle
+  ShieldCheck, UserPlus, Users
 } from 'lucide-react'
 import { AdminPageScaffold } from './AdminComponents'
 import { AdminDashboardPage } from './AdminDashboardPage'
@@ -20,6 +20,7 @@ import { AttendanceManagementPage } from './AttendanceManagementPage'
 import { AttendanceCorrectionsPage } from './AttendanceCorrectionsPage'
 import { AvailabilityManagementPage } from './AvailabilityManagementPage'
 import { LeaveManagementPage } from './LeaveManagementPage'
+import { SubstituteManagementPage } from './SubstituteManagementPage'
 
 interface AdminViewProps {
   page: string
@@ -89,56 +90,7 @@ export function AdminViewDispatcher({
       return <LeaveManagementPage onNavigateToTimetable={() => onNavigate('timetable')} />
 
     case 'substitute_faculty':
-      return (
-        <AdminPageScaffold
-          title="Substitute Faculty Management"
-          eyebrow="CONTINGENCY REPLACEMENTS"
-          description="Find subject-qualified faculty, check availability conflicts, and assign authorized replacements."
-          actions={
-            <button className="button button-primary" onClick={() => alert('Assign substitute')}>
-              <UserPlus size={15} /> New Replacement Assignment
-            </button>
-          }
-          stats={[
-            { label: 'Pending Substitutions', value: '1', note: 'Affects lecture today', icon: AlertCircle },
-            { label: 'Completed Substitutions', value: '14', note: 'This semester', icon: CheckCircle2 },
-            { label: 'Available Standby Faculty', value: '8', note: 'Qualified & unbooked', icon: UserCheck },
-          ]}
-        >
-          <div className="panel">
-            <div className="table-scroll">
-              <table className="admin-data-table">
-                <thead>
-                  <tr>
-                    <th>Lecture</th>
-                    <th>Scheduled Date</th>
-                    <th>Original Faculty</th>
-                    <th>Subject</th>
-                    <th>Assigned Substitute</th>
-                    <th>Status</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>LH-101 (11:00 AM)</td>
-                    <td>Today (19 Nov)</td>
-                    <td>Dr. Vikram Patel (On Leave)</td>
-                    <td>Robotics & Automation</td>
-                    <td><em>Pending Assignment</em></td>
-                    <td><span className="badge badge-pending">Needs Substitute</span></td>
-                    <td>
-                      <button className="button button-primary" onClick={() => alert('Search eligible replacements')}>
-                        Find Replacement
-                      </button>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </AdminPageScaffold>
-      )
+      return <SubstituteManagementPage onNavigateToTimetable={() => onNavigate('timetable')} />
 
     case 'notifications':
       return existingComponents.notifications ? (
