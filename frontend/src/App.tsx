@@ -142,27 +142,21 @@ type AdditionalLectureRequest = {
 type NavItem = { key: string; label: string; icon: typeof LayoutDashboard }
 
 const staffNavigation: NavItem[] = [
-  { key: 'Dasboard ', label: 'Dasboard ', icon: LayoutDashboard },
+  { key: 'Dasboard ', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'attendance_tracker', label: 'Attendance tracker', icon: Clock3 },
   { key: 'timetable', label: 'Timetable', icon: CalendarDays },
   { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
-  { key: 'leave', label: 'Leave requests', icon: CalendarDays },
   { key: 'notifications', label: 'Notifications', icon: Bell },
   { key: 'profile', label: 'Profile & Settings', icon: Settings },
   { key: 'enrollment', label: 'Face verification', icon: Fingerprint },
-  { key: 'tasks', label: 'My tasks', icon: ListChecks },
-  { key: 'projects', label: 'Projects', icon: FolderOpen },
   { key: 'directory', label: 'Faculty directory', icon: Users },
 ]
 const managerNavigation: NavItem[] = [
-  { key: 'Dasboard ', label: 'Dasboard ', icon: LayoutDashboard },
+  { key: 'Dasboard ', label: 'Dashboard', icon: LayoutDashboard },
   { key: 'timetable', label: 'Timetable', icon: CalendarDays },
   { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
   { key: 'attendance', label: 'Attendance', icon: Clock3 },
   { key: 'enrollment', label: 'Face verification', icon: Fingerprint },
-  { key: 'tasks', label: 'Tasks', icon: ListChecks },
-  { key: 'projects', label: 'Projects', icon: FolderOpen },
-  { key: 'leave', label: 'Leave', icon: CalendarDays },
   { key: 'approvals', label: 'Approvals', icon: ShieldCheck },
   { key: 'reports', label: 'Reports', icon: Activity },
   { key: 'directory', label: 'Faculty directory', icon: Users },
@@ -1894,7 +1888,7 @@ type TaskEntry = {
   progress: number
 }
 
-function ProjectsPage({ user, navigate }: { user: User; navigate: (page: string, projectId?: number) => void }) {
+export function ProjectsPage({ user, navigate }: { user: User; navigate: (page: string, projectId?: number) => void }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [error, setError] = useState('')
@@ -1994,7 +1988,7 @@ function TaskRow({ task, onSave }: { task: TaskEntry; onSave: (id: number, statu
   )
 }
 
-function TasksPage({ user, selectedProjectId }: { user: User; selectedProjectId: number | null }) {
+export function TasksPage({ user, selectedProjectId }: { user: User; selectedProjectId: number | null }) {
   const manager = isManager(user.role)
   const [scope, setScope] = useState<'assigned_to_me' | 'assigned_by_me' | 'all'>(manager ? 'all' : 'assigned_to_me')
   const [projectFilter, setProjectFilter] = useState(selectedProjectId ? String(selectedProjectId) : '')
@@ -2080,7 +2074,6 @@ function App() {
   const [user, setUser] = useState<User | null>(null)
   const [page, setPage] = useState('Dasboard ')
   const [pageMessage, setPageMessage] = useState('')
-  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null)
   const [checking, setChecking] = useState(Boolean(getAccessToken()))
   const [mobileMenu, setMobileMenu] = useState(false)
   const [logoutError, setLogoutError] = useState('')
@@ -2134,7 +2127,7 @@ function App() {
     }
   }
 
-  function selectPage(key: string, projectId?: number) {
+  function selectPage(key: string) {
     if (user && user.face_enrollment_status === 'not_enrolled' && key !== 'enrollment') {
       setPage('enrollment')
       setMobileMenu(false)
@@ -2142,7 +2135,6 @@ function App() {
     }
     setPage(key)
     setPageMessage('')
-    setSelectedProjectId(key === 'tasks' ? projectId || null : null)
     setMobileMenu(false)
   }
 
@@ -2232,10 +2224,7 @@ function App() {
         {page === 'attendance' && <FacultyAttendanceTrackerPage user={user} />}
         {page === 'attendance_tracker' && <FacultyAttendanceTrackerPage user={user} />}
         {page === 'additional_lectures' && <AdditionalLecturesPage user={user} />}
-        {page === 'tasks' && <TasksPage user={user} selectedProjectId={selectedProjectId} />}
-        {page === 'projects' && <ProjectsPage user={user} navigate={selectPage} />}
         {page === 'enrollment' && <FacultyBiometricsPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
-        {page === 'leave' && <LeavePage user={user} />}
         {page === 'directory' && <DirectoryPage />}
         {page === 'notifications' && <NotificationsPage />}
         {page === 'profile' && <ProfilePage user={user} />}

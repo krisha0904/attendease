@@ -6,6 +6,7 @@ import {
   Building2,
   Calendar,
   CalendarDays,
+  CalendarPlus,
   Check,
   CheckCircle2,
   Clock,
@@ -14,7 +15,6 @@ import {
   Fingerprint,
   MapPin,
   RefreshCw,
-  Send,
   ShieldCheck,
   UserCheck,
   X,
@@ -554,11 +554,11 @@ export function FacultyDashboardPage({ user: _user, navigate }: FacultyDashboard
             </button>
             <button
               className="p-3 border border-gray-100 rounded-lg hover:bg-gray-50 transition text-left flex flex-col gap-1"
-              onClick={() => navigate('leave')}
+              onClick={() => navigate('additional_lectures')}
             >
-              <Send size={18} className="text-purple-600" />
-              <strong className="text-xs">Apply for Leave</strong>
-              <span className="text-xs text-muted">Submit absence request</span>
+              <CalendarPlus size={18} className="text-purple-600" />
+              <strong className="text-xs">Additional Lecture</strong>
+              <span className="text-xs text-muted">Request extra teaching session</span>
             </button>
             <button
               className="p-3 border border-gray-100 rounded-lg hover:bg-gray-50 transition text-left flex flex-col gap-1"

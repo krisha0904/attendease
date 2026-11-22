@@ -223,19 +223,18 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
       }
 
       if (activePunch.mode === 'lecture' && activePunch.lecture) {
-        await api.post(
-          `/faculty/lectures/${activePunch.lecture.source_type}/${activePunch.lecture.schedule_id}/attendance`,
-          {
-            action: activePunch.action,
-            lecture_date: activePunch.lecture.date,
-            challenge_token: challenge.challenge_token,
-            frames,
-            latitude: locationData.latitude,
-            longitude: locationData.longitude,
-            accuracy: locationData.accuracy,
-            idempotency_key: crypto.randomUUID(),
-          }
-        )
+        await api.post(`/lecture-attendance/${activePunch.action}`, {
+          source_type: activePunch.lecture.source_type,
+          schedule_id: activePunch.lecture.schedule_id,
+          lecture_date: activePunch.lecture.date,
+          challenge_token: challenge.challenge_token,
+          frames,
+          face_image_base64: frames[frames.length - 1],
+          latitude: locationData.latitude,
+          longitude: locationData.longitude,
+          accuracy: locationData.accuracy,
+          idempotency_key: crypto.randomUUID(),
+        })
         setPageMessage(
           `Biometric ${activePunch.action === 'punch_in' ? 'Punch-In' : 'Punch-Out'} verified and recorded successfully for ${activePunch.lecture.subject}.`
         )

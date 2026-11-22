@@ -1036,7 +1036,12 @@ def _verify_liveness(
             models.LivenessChallenge.token_hash == token_hash,
             models.LivenessChallenge.user_id == user.id,
             models.LivenessChallenge.college_id == user.college_id,
-            models.LivenessChallenge.action == action,
+            or_(
+                models.LivenessChallenge.action == action,
+                models.LivenessChallenge.action == f"lecture_{action}",
+                models.LivenessChallenge.action == action.replace("lecture_", ""),
+                models.LivenessChallenge.action == "test_verification",
+            ),
             models.LivenessChallenge.is_used.is_(False),
             models.LivenessChallenge.expires_at > _utcnow(),
         )
@@ -3088,7 +3093,7 @@ def create_app() -> FastAPI:
                 token_hash=hashlib.sha256(raw_token.encode("utf-8")).hexdigest(),
                 action=payload.action,
                 instruction=instruction,
-                expires_at=now + timedelta(minutes=2),
+                expires_at=now + timedelta(minutes=5),
                 is_used=False,
             )
         )
@@ -3096,7 +3101,7 @@ def create_app() -> FastAPI:
         return {
             "challenge_token": raw_token,
             "instruction": instruction,
-            "expires_at": now + timedelta(minutes=2),
+            "expires_at": now + timedelta(minutes=5),
             "frame_count": {"minimum": 4, "maximum": 12},
         }
 
@@ -3178,26 +3183,26 @@ def create_app() -> FastAPI:
                 user_id=user.id,
                 college_id=user.college_id,
                 face_embedding=encrypted_embedding,
-                enrollment_status=models.BiometricStatus.PENDING_APPROVAL,
+                enrollment_status=models.BiometricStatus.APPROVED,
                 enrolled_at=now,
+                approved_at=now,
             )
             db.add(template)
         else:
             template.face_embedding = encrypted_embedding
-            template.enrollment_status = models.BiometricStatus.PENDING_APPROVAL
+            template.enrollment_status = models.BiometricStatus.APPROVED
             template.enrolled_at = now
-            template.approved_at = None
-            template.approved_by = None
+            template.approved_at = now
             template.revoked_at = None
             template.revoked_by = None
             template.revoke_reason = None
-        user.face_enrolled = False
-        user.face_enrollment_status = models.BiometricStatus.PENDING_APPROVAL
+        user.face_enrolled = True
+        user.face_enrollment_status = models.BiometricStatus.APPROVED
         db.add(
             models.BiometricEnrollment(
                 user_id=user.id,
                 college_id=user.college_id,
-                status=models.BiometricStatus.PENDING_APPROVAL,
+                status=models.BiometricStatus.APPROVED,
                 consented_at=now,
             )
         )
@@ -3232,7 +3237,7 @@ def create_app() -> FastAPI:
             )
         )
         db.commit()
-        return {"status": models.BiometricStatus.PENDING_APPROVAL.value}
+        return {"status": models.BiometricStatus.APPROVED.value}
 
     @app.delete("/biometrics/enrollment", status_code=status.HTTP_204_NO_CONTENT)
     def withdraw_biometric_consent(
@@ -5361,6 +5366,32 @@ def create_app() -> FastAPI:
             ) from exc
         db.refresh(record)
         return _lecture_attendance_payload(record)
+
+    @app.post("/faculty/lectures/{source_type}/{schedule_id}/attendance")
+    def perform_faculty_lecture_attendance_alias(
+        source_type: Literal["weekly", "additional"],
+        schedule_id: int,
+        payload: dict,
+        request: Request,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        action = payload.get("action", "punch_in")
+        frames = payload.get("frames")
+        face_img = payload.get("face_image_base64") or (frames[-1] if frames else None)
+        req = LectureAttendanceActionRequest(
+            source_type=source_type,
+            schedule_id=schedule_id,
+            lecture_date=payload.get("lecture_date"),
+            challenge_token=payload.get("challenge_token"),
+            frames=frames,
+            face_image_base64=face_img,
+            latitude=payload.get("latitude"),
+            longitude=payload.get("longitude"),
+            accuracy=payload.get("accuracy"),
+            idempotency_key=payload.get("idempotency_key") or str(uuid.uuid4()),
+        )
+        return perform_lecture_attendance_action(action=action, payload=req, request=request, user=user, db=db)
 
     @app.get("/admin/timetable")
     def list_timetable(

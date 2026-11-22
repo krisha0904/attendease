@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import {
   Activity, ArrowDownToLine, Bell, BookOpen, Building2, Calendar, CalendarDays,
-  CalendarRange, ChevronDown, ChevronRight, ClipboardCheck, Clock3, CreditCard,
+  ChevronDown, ChevronRight, ClipboardCheck, Clock3, CreditCard,
   Database, FileEdit, Fingerprint, LayoutDashboard, LogOut, Megaphone, Menu,
   Palmtree, School, ScrollText, Search, Settings, ShieldAlert, ShieldCheck,
   UserCheck, UserPlus, Users
@@ -56,7 +56,6 @@ export const ADMIN_NAV_GROUPS: NavGroup[] = [
       { key: 'attendance', label: 'Attendance Management', icon: ClipboardCheck },
       { key: 'attendance_corrections', label: 'Attendance Corrections', icon: FileEdit },
       { key: 'availability', label: 'Availability Management', icon: UserCheck },
-      { key: 'leave', label: 'Leave Management', icon: CalendarRange },
       { key: 'substitute_faculty', label: 'Substitute Faculty Management', icon: UserPlus },
     ],
   },

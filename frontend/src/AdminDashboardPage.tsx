@@ -286,14 +286,14 @@ export function AdminDashboardPage({ onNavigate }: { onNavigate: (page: string) 
 
         {/* Row 3: Actionable Pending Counters */}
         <div className="admin-kpi-grid admin-kpi-grid-3">
-          <div className="admin-kpi-card" onClick={() => onNavigate('leave')} style={{ cursor: 'pointer' }}>
+          <div className="admin-kpi-card" onClick={() => onNavigate('face_registration')} style={{ cursor: 'pointer' }}>
             <div className="admin-kpi-icon-wrap bg-amber-subtle text-amber">
               <Calendar size={18} />
             </div>
             <div className="admin-kpi-content">
-              <span className="admin-kpi-label">Pending Leave Requests</span>
-              <strong className="admin-kpi-value">{s?.pending_leave_requests ?? 0}</strong>
-              <span className="admin-kpi-note">Requires HOD / Admin approval</span>
+              <span className="admin-kpi-label">Pending Face Approvals</span>
+              <strong className="admin-kpi-value">{s?.pending_biometric_enrollments ?? 0}</strong>
+              <span className="admin-kpi-note">Awaiting biometric verification</span>
             </div>
           </div>
 

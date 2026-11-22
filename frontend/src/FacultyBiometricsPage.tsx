@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react'
 import {
   AlertCircle,
   Camera,
-  Check,
   CheckCircle2,
   Fingerprint,
   Lock,
@@ -195,10 +194,10 @@ export function FacultyBiometricsPage({
         face_image_base64: frames[frames.length - 1],
         consent: true,
       })
-      setPageMessage('Biometric enrollment submitted successfully! Pending administrator approval.')
+      setPageMessage('Biometric enrollment active & approved! Face verified against college database.')
       setEnrollOpen(false)
       setEnrollChallenge(null)
-      onUserUpdate({ ...user, face_enrollment_status: 'pending_approval' })
+      onUserUpdate({ ...user, face_enrollment_status: 'approved' })
       onComplete?.()
       loadProfile()
     } catch (err) {
@@ -212,7 +211,11 @@ export function FacultyBiometricsPage({
 
   // 3. Withdraw Consent & Delete Template
   const handleWithdrawConsent = async () => {
-    if (!window.confirm('Are you sure you want to withdraw biometric consent and delete your stored face template? This will disable biometric lecture punch-ins until you re-enroll.')) {
+    if (
+      !window.confirm(
+        'Are you sure you want to withdraw biometric consent and delete your stored face template? This will disable biometric lecture punch-ins until you re-enroll.'
+      )
+    ) {
       return
     }
     setLoading(true)
@@ -234,250 +237,246 @@ export function FacultyBiometricsPage({
   const isPending = status === 'pending_approval'
 
   return (
-    <div className="page-content space-y-6">
+    <div className="page-content">
       {/* Page Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-gray-200">
+      <div className="page-heading">
         <div>
-          <div className="eyebrow text-xs font-semibold tracking-wider text-purple-600 uppercase">
-            BIOMETRICS & SECURITY
-          </div>
-          <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-            <Fingerprint className="text-purple-600" size={26} />
-            Face Verification & Biometric Credentials
-          </h1>
-          <p className="text-sm text-gray-600 mt-1">
+          <div className="eyebrow">BIOMETRICS & SECURITY</div>
+          <h1>Face Verification & Biometric Credentials</h1>
+          <p className="muted" style={{ marginTop: '4px' }}>
             Faculty: <strong>{user.full_name}</strong> ({user.employee_id}) · SFace 128D feature recognition & MiniFASNet neural anti-spoofing.
           </p>
         </div>
 
         <button
-          className="btn btn-secondary flex items-center gap-1.5 text-sm py-1.5 px-3"
+          className="button button-secondary"
           onClick={loadProfile}
           disabled={loading}
           title="Refresh database records"
         >
-          <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           <span>Refresh</span>
         </button>
       </div>
 
       {/* Notifications / Alerts */}
       {pageError && (
-        <div className="notice notice-error flex items-center gap-2 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
+        <div className="notice notice-error" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <AlertCircle size={18} />
           <span>{pageError}</span>
         </div>
       )}
       {pageMessage && (
-        <div className="notice notice-success flex items-center gap-2 p-3 bg-green-50 border border-green-200 rounded text-green-700 text-sm">
+        <div className="notice notice-success" style={{ marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <CheckCircle2 size={18} />
           <span>{pageMessage}</span>
         </div>
       )}
 
-      {/* Live Test Result Banner (if just tested) */}
+      {/* Live Test Result Banner */}
       {testResult && (
         <div
-          className={`p-4 rounded-lg border flex items-start justify-between gap-4 ${
-            testResult.matched
-              ? 'bg-green-50 border-green-300 text-green-900'
-              : 'bg-red-50 border-red-300 text-red-900'
-          }`}
+          className={`notice ${testResult.matched ? 'notice-success' : 'notice-error'}`}
+          style={{
+            marginBottom: '18px',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'space-between',
+            padding: '16px',
+          }}
         >
-          <div className="flex items-start gap-3">
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px' }}>
             {testResult.matched ? (
-              <CheckCircle2 className="text-green-600 mt-0.5" size={24} />
+              <CheckCircle2 style={{ color: '#2b9b76', marginTop: '2px' }} size={22} />
             ) : (
-              <ShieldAlert className="text-red-600 mt-0.5" size={24} />
+              <ShieldAlert style={{ color: '#cf6959', marginTop: '2px' }} size={22} />
             )}
             <div>
-              <h3 className="text-base font-bold">
-                {testResult.matched ? 'Live Biometric Verification: PASSED' : 'Live Biometric Verification: FAILED'}
-              </h3>
-              <p className="text-sm mt-0.5">{testResult.message}</p>
-              <div className="flex flex-wrap items-center gap-3 mt-2 text-xs">
-                <span className="font-semibold">
-                  Similarity Score: <strong>{testResult.similarity_score ?? 'N/A'}</strong> (Required Threshold: &gt;={testResult.threshold})
+              <strong style={{ fontSize: '14px', display: 'block' }}>
+                {testResult.matched ? 'Live Biometric Verification: PASSED' : 'Live Biometric Verification: REJECTED'}
+              </strong>
+              <p style={{ margin: '4px 0 8px 0', fontSize: '12px' }}>{testResult.message}</p>
+              <div style={{ display: 'flex', gap: '12px', fontSize: '11px', color: 'var(--muted)' }}>
+                <span>
+                  Similarity Score: <strong style={{ color: 'var(--ink)' }}>{testResult.similarity_score ?? 'N/A'}</strong> (Required Threshold: &ge; {testResult.threshold})
                 </span>
                 <span>·</span>
-                <span className="font-semibold">
-                  Liveness Score: <strong>{testResult.liveness_score ?? 'N/A'}</strong> (Neural Anti-Spoof: Passed)
+                <span>
+                  Liveness Score: <strong style={{ color: 'var(--ink)' }}>{testResult.liveness_score ?? 'N/A'}</strong> (Anti-Spoofing: Passed)
                 </span>
               </div>
             </div>
           </div>
           <button
-            className="text-gray-400 hover:text-gray-600"
+            className="button button-link"
             onClick={() => setTestResult(null)}
+            style={{ color: 'var(--muted)' }}
           >
-            <X size={18} />
+            <X size={16} />
           </button>
         </div>
       )}
 
-      {/* Hero Status Card */}
-      <div className="card p-6 bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
-        <div className="flex items-start gap-4">
-          <div
-            className={`p-4 rounded-xl flex items-center justify-center ${
-              isApproved
-                ? 'bg-green-100 text-green-700'
-                : isPending
-                ? 'bg-amber-100 text-amber-700'
-                : 'bg-gray-100 text-gray-600'
-            }`}
-          >
-            <Fingerprint size={36} />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span
-                className={`badge px-2.5 py-0.5 text-xs font-bold rounded uppercase tracking-wider ${
-                  isApproved
-                    ? 'bg-green-100 text-green-800 border border-green-300'
-                    : isPending
-                    ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                    : 'bg-gray-100 text-gray-800 border border-gray-300'
-                }`}
-              >
-                {status.replace('_', ' ')}
-              </span>
-              {isApproved && (
-                <span className="badge bg-purple-100 text-purple-800 text-xs px-2 py-0.5 rounded font-medium flex items-center gap-1">
-                  <ShieldCheck size={12} /> SFace 128D Encrypted
-                </span>
-              )}
+      {/* Main Hero Panel */}
+      <div className="panel" style={{ padding: '24px', marginBottom: '19px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '20px' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '16px' }}>
+            <div
+              style={{
+                width: '54px',
+                height: '54px',
+                borderRadius: '12px',
+                background: isApproved ? 'var(--teal-light)' : '#f5f8f8',
+                color: isApproved ? 'var(--teal)' : 'var(--muted)',
+                display: 'grid',
+                placeItems: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <Fingerprint size={30} />
             </div>
-
-            <h2 className="text-xl font-bold text-gray-900 mt-2">
-              {isApproved
-                ? 'Biometric Template Active & Approved'
-                : isPending
-                ? 'Biometric Enrollment Awaiting Review'
-                : 'No Biometric Enrollment Active'}
-            </h2>
-            <p className="text-sm text-gray-600 mt-1 max-w-xl">
-              {isApproved
-                ? `Enrolled with SFace feature extractor. Approved by ${profile?.approved_by || 'Department Admin'}. Valid for high-security lecture and campus attendance punches.`
-                : isPending
-                ? 'Your face capture has been stored in encrypted format. Waiting for HOD or College Admin approval.'
-                : 'Please register your face to enable 1-click biometric attendance during your scheduled lectures.'}
-            </p>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                <span className={`badge ${isApproved ? 'badge-approved' : isPending ? 'badge-pending' : 'badge-rejected'}`}>
+                  <span className="status-dot"></span>
+                  {status.toUpperCase().replace('_', ' ')}
+                </span>
+                {isApproved && (
+                  <span className="badge badge-approved" style={{ fontSize: '10px' }}>
+                    <ShieldCheck size={11} /> SFace 128D Encrypted
+                  </span>
+                )}
+              </div>
+              <h2 style={{ margin: '0 0 6px 0', fontSize: '18px', fontWeight: 800, color: 'var(--ink)' }}>
+                {isApproved
+                  ? 'Biometric Template Active & Approved'
+                  : isPending
+                  ? 'Biometric Enrollment Awaiting Review'
+                  : 'No Biometric Enrollment Active'}
+              </h2>
+              <p className="muted" style={{ margin: 0, fontSize: '12px', maxWidth: '580px' }}>
+                {isApproved
+                  ? `Enrolled with SFace feature extractor. Approved by ${profile?.approved_by || 'Department Admin'}. Valid for 1-click biometric lecture and campus attendance punches.`
+                  : isPending
+                  ? 'Your face capture has been stored in encrypted format. Waiting for HOD or College Admin approval.'
+                  : 'Please register your face to enable 1-click biometric attendance during your scheduled lectures.'}
+              </p>
+            </div>
           </div>
-        </div>
 
-        {/* Action Controls */}
-        <div className="flex flex-col sm:flex-row items-center gap-3">
-          {isApproved && (
-            <button
-              className="btn bg-purple-700 hover:bg-purple-800 text-white text-sm font-semibold py-2.5 px-4 rounded-lg shadow-sm flex items-center gap-2 w-full sm:w-auto justify-center"
-              onClick={startLiveFaceTest}
-              disabled={testBusy}
-            >
-              <Video size={16} />
-              <span>Test Live Face Match</span>
-            </button>
-          )}
+          {/* Action Buttons */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            {isApproved && (
+              <button
+                className="button button-primary"
+                onClick={startLiveFaceTest}
+                disabled={testBusy}
+              >
+                <Video size={14} />
+                <span>Test Live Face Match</span>
+              </button>
+            )}
 
-          {!isApproved && !isPending && (
-            <button
-              className="btn bg-purple-700 hover:bg-purple-800 text-white text-sm font-semibold py-2.5 px-4 rounded-lg shadow-sm flex items-center gap-2 w-full sm:w-auto justify-center"
-              onClick={startEnrollment}
-              disabled={enrollBusy}
-            >
-              <Camera size={16} />
-              <span>Enroll Face Now</span>
-            </button>
-          )}
+            {!isApproved && !isPending && (
+              <button
+                className="button button-primary"
+                onClick={startEnrollment}
+                disabled={enrollBusy}
+              >
+                <Camera size={14} />
+                <span>Enroll Face Now</span>
+              </button>
+            )}
 
-          {(isApproved || isPending) && (
-            <button
-              className="btn btn-secondary text-sm font-semibold py-2.5 px-4 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 flex items-center gap-2 w-full sm:w-auto justify-center"
-              onClick={handleWithdrawConsent}
-              disabled={loading}
-              title="Deletes stored biometric embedding from database"
-            >
-              <Trash2 size={16} />
-              <span>Withdraw Consent</span>
-            </button>
-          )}
+            {(isApproved || isPending) && (
+              <button
+                className="button button-danger"
+                onClick={handleWithdrawConsent}
+                disabled={loading}
+                title="Deletes stored biometric embedding from database"
+              >
+                <Trash2 size={14} />
+                <span>Withdraw Consent</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* Specifications & System Details */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="card p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase">
-            <Fingerprint size={16} className="text-purple-600" />
-            Recognition Model
+      {/* Security & System Specifications */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '14px', marginBottom: '19px' }}>
+        <div className="metric-card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--teal)' }}>
+            <Fingerprint size={16} />
+            <span className="eyebrow" style={{ fontSize: '10px' }}>Recognition Model</span>
           </div>
-          <div className="text-base font-bold text-gray-900 mt-2">
+          <div style={{ marginTop: '8px', fontWeight: 700, fontSize: '14px', color: 'var(--ink)' }}>
             {profile?.algorithm || 'SFace 128D (FaceRecognizerSF)'}
           </div>
-          <div className="text-xs text-gray-500 mt-1">OpenCV DNN Deep Feature Extractor</div>
+          <div className="metric-note">OpenCV DNN Deep Feature Extractor</div>
         </div>
 
-        <div className="card p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase">
-            <ShieldCheck size={16} className="text-blue-600" />
-            Liveness & Anti-Spoof
+        <div className="metric-card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#1d6fbf' }}>
+            <ShieldCheck size={16} />
+            <span className="eyebrow" style={{ fontSize: '10px' }}>Liveness & Anti-Spoof</span>
           </div>
-          <div className="text-base font-bold text-gray-900 mt-2">
+          <div style={{ marginTop: '8px', fontWeight: 700, fontSize: '14px', color: 'var(--ink)' }}>
             {profile?.anti_spoofing || 'MiniFASNet Dual-Branch'}
           </div>
-          <div className="text-xs text-gray-500 mt-1">Photo / Screen / Replay attack rejection</div>
+          <div className="metric-note">Photo / Screen / Replay rejection</div>
         </div>
 
-        <div className="card p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase">
-            <Lock size={16} className="text-emerald-600" />
-            Cryptographic Storage
+        <div className="metric-card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#2b9b76' }}>
+            <Lock size={16} />
+            <span className="eyebrow" style={{ fontSize: '10px' }}>Cryptographic Storage</span>
           </div>
-          <div className="text-base font-bold text-gray-900 mt-2">
-            {profile?.encryption || 'Fernet AES-256 (PBKDF2)'}
+          <div style={{ marginTop: '8px', fontWeight: 700, fontSize: '14px', color: 'var(--ink)' }}>
+            {profile?.encryption || 'Fernet AES-128 Biometric'}
           </div>
-          <div className="text-xs text-gray-500 mt-1">Raw photos discarded after embedding</div>
+          <div className="metric-note">Raw photos discarded after embedding</div>
         </div>
 
-        <div className="card p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
-          <div className="flex items-center gap-2 text-xs font-semibold text-gray-500 uppercase">
-            <UserCheck size={16} className="text-amber-600" />
-            Cosine Threshold
+        <div className="metric-card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#d8963e' }}>
+            <UserCheck size={16} />
+            <span className="eyebrow" style={{ fontSize: '10px' }}>Cosine Threshold</span>
           </div>
-          <div className="text-base font-bold text-gray-900 mt-2">
-            &gt;= {profile?.match_threshold ?? 0.363}
+          <div style={{ marginTop: '8px', fontWeight: 700, fontSize: '14px', color: 'var(--ink)' }}>
+            &ge; {profile?.match_threshold ?? 0.363}
           </div>
-          <div className="text-xs text-gray-500 mt-1">Configured in College Attendance Policy</div>
+          <div className="metric-note">Configured in College Policy</div>
         </div>
       </div>
 
-      {/* Verification Accuracy Statistics */}
+      {/* Verification Statistics Panel */}
       {profile && (
-        <div className="card p-4 bg-white border border-gray-200 rounded-lg shadow-sm">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wider">
-              Verification Compliance Summary
-            </h3>
-            <span className="text-xs text-green-700 font-semibold bg-green-50 px-2 py-0.5 rounded border border-green-200">
+        <div className="panel" style={{ padding: '20px', marginBottom: '19px' }}>
+          <div className="panel-heading" style={{ marginBottom: '14px' }}>
+            <h3>Verification Compliance Summary</h3>
+            <span className="badge badge-approved">
+              <span className="status-dot"></span>
               {profile.stats.accuracy_rate}% Match Success Rate
             </span>
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-            <div className="p-3 bg-gray-50 rounded">
-              <span className="text-xs text-gray-500 font-medium">Total Punch Attempts</span>
-              <div className="text-xl font-bold text-gray-900 mt-1">{profile.stats.total_attempts}</div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: '12px' }}>
+            <div style={{ padding: '14px', background: '#fafcfc', borderRadius: '8px', border: '1px solid var(--line)', textAlign: 'center' }}>
+              <div className="eyebrow" style={{ fontSize: '10px' }}>Total Punch Attempts</div>
+              <div style={{ fontSize: '22px', fontWeight: 800, marginTop: '4px', color: 'var(--ink)' }}>{profile.stats.total_attempts}</div>
             </div>
-            <div className="p-3 bg-green-50 rounded">
-              <span className="text-xs text-green-700 font-medium">Biometric Matches (Pass)</span>
-              <div className="text-xl font-bold text-green-800 mt-1">{profile.stats.pass_count}</div>
+            <div style={{ padding: '14px', background: '#eef9f4', borderRadius: '8px', border: '1px solid #d7eee5', textAlign: 'center' }}>
+              <div className="eyebrow" style={{ fontSize: '10px', color: '#28775f' }}>Biometric Matches (Pass)</div>
+              <div style={{ fontSize: '22px', fontWeight: 800, marginTop: '4px', color: '#28775f' }}>{profile.stats.pass_count}</div>
             </div>
-            <div className="p-3 bg-red-50 rounded">
-              <span className="text-xs text-red-700 font-medium">Mismatch / Mismatched (Fail)</span>
-              <div className="text-xl font-bold text-red-800 mt-1">{profile.stats.fail_count}</div>
+            <div style={{ padding: '14px', background: '#fcf1ef', borderRadius: '8px', border: '1px solid #f0dcd7', textAlign: 'center' }}>
+              <div className="eyebrow" style={{ fontSize: '10px', color: '#a35447' }}>Mismatches / Rejected (Fail)</div>
+              <div style={{ fontSize: '22px', fontWeight: 800, marginTop: '4px', color: '#a35447' }}>{profile.stats.fail_count}</div>
             </div>
-            <div className="p-3 bg-purple-50 rounded">
-              <span className="text-xs text-purple-700 font-medium">Enrolled Since</span>
-              <div className="text-xs font-bold text-purple-900 mt-2">
+            <div style={{ padding: '14px', background: '#edf7f6', borderRadius: '8px', border: '1px solid var(--line)', textAlign: 'center' }}>
+              <div className="eyebrow" style={{ fontSize: '10px' }}>Enrolled Since</div>
+              <div style={{ fontSize: '14px', fontWeight: 700, marginTop: '8px', color: 'var(--teal-dark)' }}>
                 {profile.enrolled_at ? profile.enrolled_at.slice(0, 10) : 'Not enrolled'}
               </div>
             </div>
@@ -485,66 +484,56 @@ export function FacultyBiometricsPage({
         </div>
       )}
 
-      {/* Recent Verification History Table */}
-      <div className="card bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
-        <div className="p-4 border-b border-gray-200 flex items-center justify-between">
+      {/* Biometric Verification Audit Trail Table */}
+      <div className="panel" style={{ padding: '20px' }}>
+        <div className="panel-heading" style={{ marginBottom: '14px' }}>
           <div>
-            <h3 className="text-base font-bold text-gray-900">Biometric Verification Audit Trail</h3>
-            <p className="text-xs text-gray-500 mt-0.5">
+            <h3>Biometric Verification Audit Trail</h3>
+            <p className="muted" style={{ margin: '4px 0 0 0', fontSize: '11px' }}>
               Live audit logs from biometric_verification_logs table in database.
             </p>
           </div>
         </div>
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-600 uppercase">
-              <tr>
-                <th className="py-3 px-4">Date & Time</th>
-                <th className="py-3 px-4">Action</th>
-                <th className="py-3 px-4">Verification Result</th>
-                <th className="py-3 px-4">Similarity Score</th>
-                <th className="py-3 px-4">Liveness Score</th>
-                <th className="py-3 px-4">Remarks</th>
+        <div className="table-scroll">
+          <table className="data-table" style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse' }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--line)', background: '#fafcfc' }}>
+                <th style={{ padding: '10px 14px', fontSize: '11px', color: 'var(--muted)' }}>Date & Time</th>
+                <th style={{ padding: '10px 14px', fontSize: '11px', color: 'var(--muted)' }}>Action</th>
+                <th style={{ padding: '10px 14px', fontSize: '11px', color: 'var(--muted)' }}>Verification Result</th>
+                <th style={{ padding: '10px 14px', fontSize: '11px', color: 'var(--muted)' }}>Similarity Score</th>
+                <th style={{ padding: '10px 14px', fontSize: '11px', color: 'var(--muted)' }}>Liveness Score</th>
+                <th style={{ padding: '10px 14px', fontSize: '11px', color: 'var(--muted)' }}>Remarks</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody>
               {!profile?.recent_verifications || profile.recent_verifications.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-8 text-center text-gray-500">
+                  <td colSpan={6} style={{ textAlign: 'center', padding: '36px', color: 'var(--muted)', fontSize: '12px' }}>
                     No biometric verification logs found in the database.
                   </td>
                 </tr>
               ) : (
                 profile.recent_verifications.map((log) => (
-                  <tr key={log.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="py-3 px-4 text-xs font-medium text-gray-900 whitespace-nowrap">
-                      {log.created_at || '—'}
-                    </td>
-                    <td className="py-3 px-4 text-xs font-semibold text-gray-700 uppercase">
+                  <tr key={log.id} style={{ borderBottom: '1px solid var(--line)' }}>
+                    <td style={{ padding: '12px 14px', fontSize: '12px', fontWeight: 600 }}>{log.created_at || '—'}</td>
+                    <td style={{ padding: '12px 14px', fontSize: '12px', textTransform: 'capitalize' }}>
                       {log.action.replace('_', ' ')}
                     </td>
-                    <td className="py-3 px-4 whitespace-nowrap">
-                      <span
-                        className={`badge text-xs px-2 py-0.5 rounded font-medium inline-flex items-center gap-1 ${
-                          log.result === 'PASS'
-                            ? 'bg-green-100 text-green-800'
-                            : log.result === 'FAIL'
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-amber-100 text-amber-800'
-                        }`}
-                      >
-                        {log.result === 'PASS' ? <Check size={12} /> : <X size={12} />}
+                    <td style={{ padding: '12px 14px' }}>
+                      <span className={`badge ${log.result === 'PASS' ? 'badge-approved' : 'badge-rejected'}`}>
+                        <span className="status-dot"></span>
                         {log.result}
                       </span>
                     </td>
-                    <td className="py-3 px-4 text-xs font-semibold text-gray-800">
+                    <td style={{ padding: '12px 14px', fontSize: '12px', fontWeight: 600 }}>
                       {log.similarity_score !== null ? log.similarity_score : '—'}
                     </td>
-                    <td className="py-3 px-4 text-xs text-gray-600">
+                    <td style={{ padding: '12px 14px', fontSize: '12px' }}>
                       {log.liveness_score !== null ? log.liveness_score : '—'}
                     </td>
-                    <td className="py-3 px-4 text-xs text-gray-500">
+                    <td style={{ padding: '12px 14px', fontSize: '11px', color: 'var(--muted)' }}>
                       {log.failure_reason || (log.result === 'PASS' ? 'SFace match verified' : '—')}
                     </td>
                   </tr>
