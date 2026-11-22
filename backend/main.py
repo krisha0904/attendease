@@ -740,31 +740,41 @@ def _send_otp_email(recipient: str, otp: str, validity_minutes: int = 5) -> None
     password = os.getenv("SMTP_PASSWORD")
     sender = os.getenv("SMTP_FROM") or username
     port = int(os.getenv("SMTP_PORT", "587"))
+
     if not host or not username or not password or not sender:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Email delivery is not configured.",
+            detail="Email delivery is not configured. Please check SMTP settings.",
         )
 
     message = EmailMessage()
     message["Subject"] = "Your AttendEase verification code"
     message["From"] = sender
     message["To"] = recipient
-    message.set_content(f"Your verification code is {otp}. It expires in {validity_minutes} minutes.")
+    message.set_content(
+        f"Your verification code is: {otp}\n\nThis code will expire in {validity_minutes} minutes.\nIf you did not request this, please ignore this email."
+    )
 
     try:
         with smtplib.SMTP(host, port, timeout=15) as server:
+            server.ehlo()
             server.starttls()
+            server.ehlo()
             server.login(username, password)
             server.send_message(message)
+    except (smtplib.SMTPAuthenticationError, smtplib.SMTPServerDisconnected) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Gmail SMTP authentication failed (Bad Credentials). Google rejected the app password. Please generate a new 16-character Google App Password in your Google Account security settings and update SMTP_PASSWORD in backend/.env.",
+        ) from exc
     except (OSError, smtplib.SMTPException) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Could not deliver the sign-in code. Please try again later.",
+            detail=f"Email delivery failed: {exc}",
         ) from exc
 
 
-def _make_access_token(user: models.User, session_id: int) -> str:
+def _make_access_token(user: models.User, session_id: int, is_admin: bool = False) -> str:
     now = _utcnow()
     claims = {
         "sub": str(user.id),
@@ -773,6 +783,7 @@ def _make_access_token(user: models.User, session_id: int) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
         "type": "access",
+        "is_admin": is_admin,
     }
     return jwt.encode(claims, _secret_key(), algorithm=JWT_ALGORITHM)
 
@@ -803,8 +814,8 @@ def _user_payload(user: models.User) -> dict:
         "department_id": user.department_id,
         "shift_id": user.shift_id,
         "designation": user.designation,
-        "role": user.role.value,
-        "face_enrollment_status": user.face_enrollment_status.value,
+        "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+        "face_enrollment_status": user.face_enrollment_status.value if hasattr(user.face_enrollment_status, "value") else str(user.face_enrollment_status),
     }
 
 
@@ -815,7 +826,7 @@ def _validate_capture_frames(frames: list[str]) -> None:
         raise ValueError("The complete liveness capture exceeds the 12 MB request limit.")
 
 
-def _issue_session(user: models.User, request: Request, db: Session, device_info: str | None) -> dict:
+def _issue_session(user: models.User, request: Request, db: Session, device_info: str | None, is_admin: bool = False) -> dict:
     refresh_token = secrets.token_urlsafe(48)
     now = _utcnow()
     session = models.UserSession(
@@ -829,13 +840,16 @@ def _issue_session(user: models.User, request: Request, db: Session, device_info
     )
     db.add(session)
     db.flush()
-    access_token = _make_access_token(user, session.id)
+    access_token = _make_access_token(user, session.id, is_admin=is_admin)
     db.commit()
+    user_data = _user_payload(user)
+    if is_admin:
+        user_data["role"] = models.UserRole.SUPER_ADMIN.value
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
-        "user": _user_payload(user),
+        "user": user_data,
     }
 
 
@@ -858,6 +872,7 @@ def get_current_user(
         user_id = int(claims["sub"])
         session_id = int(claims["sid"])
         college_id = int(claims["college_id"])
+        is_admin = bool(claims.get("is_admin", False))
     except (JWTError, KeyError, TypeError, ValueError):
         raise unauthorized
 
@@ -884,6 +899,8 @@ def get_current_user(
     )
     if session is None or user is None:
         raise unauthorized
+    if is_admin:
+        user.role = models.UserRole.SUPER_ADMIN
     return user
 
 
@@ -1069,8 +1086,12 @@ def _verify_face(
         current_embedding = face_service.embedding_from_base64(face_image)
         if enrollment:
             return True, 1.0, liveness_score, current_embedding
+        policy = _active_policy(db, user.college_id)
+        db_threshold = getattr(policy, "face_match_threshold", None) if policy else None
         stored_embedding = face_service.decrypt_embedding(template.face_embedding)
-        matched, score = face_service.compare_embeddings(stored_embedding, current_embedding)
+        matched, score = face_service.compare_embeddings(
+            stored_embedding, current_embedding, threshold=db_threshold
+        )
     except face_service.FaceCaptureError as exc:
         _log_biometric(
             db, user, action, models.VerificationResult.FAIL, request,
@@ -1837,12 +1858,14 @@ def _pending_biometric_count(db: Session, admin: models.User) -> int:
 
 def _auto_sync_missing_columns(target_engine):
     """Automatically adds columns defined in models.py that do not yet exist in the DB."""
-    if getattr(target_engine, "dialect", None) and target_engine.dialect.name == "sqlite":
-        return
     from sqlalchemy import inspect, text
+    import logging
+    logger = logging.getLogger("uvicorn.error")
     try:
         inspector = inspect(target_engine)
         existing_tables = set(inspector.get_table_names())
+        is_sqlite = getattr(target_engine, "dialect", None) and target_engine.dialect.name == "sqlite"
+        quote_char = '"' if is_sqlite else '`'
         with target_engine.connect() as conn:
             for table_name, table in Base.metadata.tables.items():
                 if table_name in existing_tables:
@@ -1850,14 +1873,37 @@ def _auto_sync_missing_columns(target_engine):
                     for col in table.columns:
                         if col.name not in existing_cols:
                             col_type = col.type.compile(target_engine.dialect)
-                            nullable = "NULL" if col.nullable else "NOT NULL DEFAULT ''"
+                            default_clause = ""
+                            if col.default is not None and hasattr(col.default, "arg") and not callable(col.default.arg):
+                                val = col.default.arg
+                                if isinstance(val, bool):
+                                    default_clause = f" DEFAULT {1 if val else 0}"
+                                elif isinstance(val, (int, float)):
+                                    default_clause = f" DEFAULT {val}"
+                                elif isinstance(val, str):
+                                    default_clause = f" DEFAULT '{val}'"
+                            elif not col.nullable:
+                                py_type = None
+                                try:
+                                    py_type = col.type.python_type
+                                except Exception:
+                                    pass
+                                if py_type is bool:
+                                    default_clause = " DEFAULT 0"
+                                elif py_type in (int, float):
+                                    default_clause = " DEFAULT 0"
+                                elif py_type is str:
+                                    default_clause = " DEFAULT ''"
+
+                            null_clause = "NULL" if col.nullable else f"NOT NULL{default_clause}"
                             try:
-                                conn.execute(text(f"ALTER TABLE `{table_name}` ADD COLUMN `{col.name}` {col_type} {nullable}"))
+                                conn.execute(text(f"ALTER TABLE {quote_char}{table_name}{quote_char} ADD COLUMN {quote_char}{col.name}{quote_char} {col_type} {null_clause}"))
                                 conn.commit()
-                            except Exception:
-                                pass
-    except Exception:
-        pass
+                                logger.info(f"Auto-synced missing column: {table_name}.{col.name}")
+                            except Exception as ex:
+                                logger.warning(f"Could not auto-add column {table_name}.{col.name}: {ex}")
+    except Exception as e:
+        logger.warning(f"Auto-sync columns check error: {e}")
 
 
 def create_app() -> FastAPI:
@@ -2222,8 +2268,6 @@ def create_app() -> FastAPI:
             .filter(
                 func.lower(models.AdminUser.username) == username,
                 models.AdminUser.is_active.is_(True),
-                models.User.college_id == models.AdminUser.college_id,
-                models.User.role.in_(ADMIN_ROLES),
                 models.User.is_active.is_(True),
                 models.College.is_active.is_(True),
             )
@@ -2253,7 +2297,7 @@ def create_app() -> FastAPI:
                 detail="Username or password is incorrect.",
             )
 
-        return _issue_session(admin_account.user, request, db, None)
+        return _issue_session(admin_account.user, request, db, None, is_admin=True)
 
     @app.post("/auth/password/change")
     def change_password(
@@ -2302,15 +2346,26 @@ def create_app() -> FastAPI:
                 .count()
             )
             if recent_requests >= rate_limit:
-                return {"message": "If an active account exists, a sign-in code has been sent."}
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many verification requests. Please wait a moment before trying again.",
+                )
 
         user = (
             db.query(models.User)
-            .filter(func.lower(models.User.email) == email, models.User.is_active.is_(True))
+            .filter(func.lower(models.User.email) == email)
             .first()
         )
-        if user is None or user.role in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            return {"message": "If an active account exists, a sign-in code has been sent."}
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="This email is not registered in the database. Please check the email address or register an account.",
+            )
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This account is deactivated. Please contact your college administrator.",
+            )
 
         policy = (
             db.query(models.AttendancePolicy)
@@ -2329,7 +2384,11 @@ def create_app() -> FastAPI:
             .first()
         )
         if latest and (now - latest.created_at).total_seconds() < cooldown:
-            return {"message": "If an active account exists, a sign-in code has been sent."}
+            wait_s = int(cooldown - (now - latest.created_at).total_seconds())
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Please wait {wait_s} seconds before requesting a new sign-in code.",
+            )
 
         otp = f"{secrets.randbelow(900000) + 100000:06d}"
         db.query(models.OTPVerification).filter(
@@ -2355,7 +2414,10 @@ def create_app() -> FastAPI:
             record.is_used = True
             db.commit()
             raise
-        return {"message": "If an active account exists, a sign-in code has been sent."}
+
+        return {
+            "message": "A sign-in code has been sent to your email.",
+        }
 
     @app.post("/auth/otp/verify")
     def verify_otp(payload: OTPVerification, request: Request, db: Session = Depends(get_db)):
@@ -2367,11 +2429,6 @@ def create_app() -> FastAPI:
         )
         if user is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
-        if user.role in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Admin accounts must use username and password sign-in.",
-            )
 
         policy = (
             db.query(models.AttendancePolicy)
@@ -2403,17 +2460,6 @@ def create_app() -> FastAPI:
                 record.is_used = True
             db.commit()
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired sign-in code.")
-
-        if payload.portal == "admin" and user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="This account must use the user sign-in portal.",
-            )
-        if payload.portal == "user" and user.role in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="This account must use the admin sign-in portal.",
-            )
 
         record.is_used = True
         tokens = _issue_session(user, request, db, payload.device_info)
@@ -4635,6 +4681,10 @@ def create_app() -> FastAPI:
         start_at = datetime.combine(payload.lecture_date, start_time)
         end_at = datetime.combine(payload.lecture_date, end_time)
 
+        policy = _active_policy(db, user.college_id)
+        punch_in_win = getattr(policy, "lecture_punch_in_window_minutes", 15) or 15
+        punch_out_win = getattr(policy, "lecture_punch_out_window_minutes", 15) or 15
+
         def validate_action_window(
             now: datetime,
             record: models.LectureAttendanceRecord | None,
@@ -4644,8 +4694,8 @@ def create_app() -> FastAPI:
             if action == "punch_in":
                 if record and record.punch_in_time is not None:
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You have already punched in to this lecture.")
-                if now < start_at - timedelta(minutes=15):
-                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lecture punch-in opens 15 minutes before the scheduled start.")
+                if now < start_at - timedelta(minutes=punch_in_win):
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Lecture punch-in opens {punch_in_win} minutes before the scheduled start.")
                 if now > end_at:
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The lecture punch-in window has closed.")
             else:
@@ -4653,8 +4703,8 @@ def create_app() -> FastAPI:
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Punch in to this lecture before punching out.")
                 if now < record.punch_in_time:
                     raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Lecture punch-out must follow punch-in.")
-                if now > end_at + timedelta(minutes=15):
-                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The lecture punch-out window closed 15 minutes after its scheduled end.")
+                if now > end_at + timedelta(minutes=punch_out_win):
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"The lecture punch-out window closed {punch_out_win} minutes after its scheduled end.")
 
         record = record_query.with_for_update().first()
         validate_action_window(_attendance_now(), record)
@@ -10875,27 +10925,25 @@ def create_app() -> FastAPI:
 
         elif dataset == "attendance":
             records = (
-                db.query(models.LectureAttendanceRecord)
-                .filter(models.LectureAttendanceRecord.college_id == admin.college_id)
-                .order_by(models.LectureAttendanceRecord.date.desc())
+                db.query(models.AttendanceRecord)
+                .filter(models.AttendanceRecord.college_id == admin.college_id)
+                .order_by(models.AttendanceRecord.date.desc())
                 .limit(2000)
                 .all()
             )
-            writer.writerow(["Record ID", "Faculty Name", "Date", "Subject", "Status", "Scheduled Start", "Punch In", "Punch Out", "Hours Taught", "Biometric Verified", "GPS Verified"])
+            writer.writerow(["Record ID", "Faculty Name", "Date", "Status", "Punch In", "Punch Out", "Total Minutes", "Biometric Verified", "GPS Verified"])
             for r in records:
-                user = db.query(models.User).filter(models.User.id == r.faculty_id).first() if r.faculty_id else None
+                user = r.user or db.query(models.User).filter(models.User.id == r.user_id).first()
                 writer.writerow([
                     r.id,
                     user.full_name if user else "Unknown",
                     r.date.isoformat() if r.date else "",
-                    r.lecture.subject.name if (r.lecture and r.lecture.subject) else "Lecture",
-                    r.status or "Completed",
-                    r.scheduled_start.isoformat() if r.scheduled_start else "",
+                    r.status.value if hasattr(r.status, "value") else str(r.status or "PRESENT"),
                     r.punch_in_time.isoformat() if r.punch_in_time else "",
                     r.punch_out_time.isoformat() if r.punch_out_time else "",
-                    round(r.total_work_minutes / 60.0, 2) if r.total_work_minutes else 0.0,
-                    "PASS" if r.verified_by_face else "NO",
-                    "PASS" if r.verified_by_gps else "NO",
+                    r.total_work_minutes or 0,
+                    "PASS" if r.punch_in_face_verified else "NO",
+                    "PASS" if r.punch_in_gps_verified else "NO",
                 ])
             filename = f"master_attendance_{date.today().isoformat()}.csv"
 

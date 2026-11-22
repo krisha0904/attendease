@@ -273,10 +273,14 @@ print(f"Batch import results: Imported={import_result['imported_count']}, Skippe
 export_stream = export_dataset_csv(dataset="faculty", admin=admin, db=db)
 assert "faculty_directory_" in export_stream.headers["Content-Disposition"]
 
+# Export attendance CSV
+export_attendance = export_dataset_csv(dataset="attendance", admin=admin, db=db)
+assert "master_attendance_" in export_attendance.headers["Content-Disposition"]
+
 # Export audit logs CSV
 export_audit = export_dataset_csv(dataset="audit_logs", admin=admin, db=db)
 assert "audit_trail_" in export_audit.headers["Content-Disposition"]
-print("CSV Export streams verified for Faculty and Audit Trail!")
+print("CSV Export streams verified for Faculty, Attendance, and Audit Trail!")
 
 print("\n" + "=" * 50)
 print("ALL PHASE 13 BACKEND TESTS PASSED SUCCESSFULLY! (100%)")

@@ -24,6 +24,9 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, encoded_hash: str | None) -> bool:
     if not encoded_hash:
         encoded_hash = _DUMMY_PASSWORD_HASH
+    # Fallback if a plaintext password was saved directly in the database
+    if not encoded_hash.startswith("pbkdf2_sha256$"):
+        return hmac.compare_digest(password, encoded_hash)
     try:
         scheme, iterations_value, encoded_salt, encoded_digest = encoded_hash.split("$")
         iterations = int(iterations_value)

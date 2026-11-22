@@ -6,10 +6,14 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_SQLITE_PATH = os.path.join(BASE_DIR, "attendease_dev.db")
+DEFAULT_SQLITE_URL = f"sqlite:///{DEFAULT_SQLITE_PATH.replace(os.sep, '/')}"
+
 if os.getenv("ATTENDEASE_TESTING") == "1":
     DATABASE_URL = "sqlite:///:memory:"
 else:
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./attendease_dev.db")
+    DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_SQLITE_URL)
 engine_options = {"pool_pre_ping": True}
 
 if DATABASE_URL.startswith("sqlite"):
@@ -23,9 +27,8 @@ else:
             pass
         engine = candidate_engine
     except Exception as e:
-        print(f"Notice: Primary database ({DATABASE_URL}) unreachable: {e}. Falling back to SQLite.")
-        fallback_url = "sqlite:///./attendease.db"
-        engine = create_engine(fallback_url, connect_args={"check_same_thread": False}, pool_pre_ping=True)
+        print(f"Notice: Primary database ({DATABASE_URL}) unreachable: {e}. Falling back to SQLite ({DEFAULT_SQLITE_URL}).")
+        engine = create_engine(DEFAULT_SQLITE_URL, connect_args={"check_same_thread": False}, pool_pre_ping=True)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

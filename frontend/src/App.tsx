@@ -609,12 +609,15 @@ function UserDashboard({ user, navigate }: { user: User; navigate: (page: string
   )
   const selectedLectures = overview?.today.lectures || null
   const nextLecture = overview?.next_lecture || null
-  const importantNotification = (notifications || [])
+  const notificationList: NotificationEntry[] = Array.isArray(notifications)
+    ? notifications
+    : ((notifications as unknown as { items?: NotificationEntry[] })?.items || [])
+  const importantNotification = notificationList
     .filter((item) => !item.is_read)
     .sort((left, right) => {
       const priority = (type: string) => type === 'error' ? 2 : type === 'warning' ? 1 : 0
       return priority(right.type) - priority(left.type)
-        || right.created_at.localeCompare(left.created_at)
+        || (right.created_at || '').localeCompare(left.created_at || '')
     })[0]
   const [lectureChallenge, setLectureChallenge] = useState<Challenge | null>(null)
   const [activeLectureAction, setActiveLectureAction] = useState<{
@@ -1629,10 +1632,11 @@ function ReportsPage({ user }: { user: User }) {
 
 function NotificationsPage() {
   const [error, setError] = useState('')
-  const { data: items, error: loadError, reload } = useReloadable(
-    () => fetchJson<Array<{ id: number; title: string; message: string; type: string; is_read: boolean; created_at: string }>>('/notifications'),
+  const { data: rawItems, error: loadError, reload } = useReloadable(
+    () => fetchJson<Array<{ id: number; title: string; message: string; type: string; is_read: boolean; created_at: string }> | { items: Array<{ id: number; title: string; message: string; type: string; is_read: boolean; created_at: string }> }>('/notifications'),
     'notifications',
   )
+  const items = Array.isArray(rawItems) ? rawItems : (rawItems?.items || [])
   async function markRead(id: number) {
     setError('')
     try {
@@ -2082,9 +2086,12 @@ function App() {
     if (!getAccessToken()) return
     api.get<User>('/auth/me')
       .then(({ data }) => {
-        if (portalForRole(data.role) !== requestedPortal) {
-          window.location.replace(loginPath(portalForRole(data.role)))
-          return
+        const correctPortal = portalForRole(data.role)
+        if (correctPortal !== requestedPortal) {
+          const targetPath = correctPortal === 'admin' ? '/admin' : '/'
+          if (window.location.pathname !== targetPath) {
+            window.history.replaceState(null, '', targetPath)
+          }
         }
         setUser(data)
         if (data.face_enrollment_status === 'not_enrolled') setPage('enrollment')

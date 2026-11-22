@@ -138,16 +138,21 @@ def decrypt_embedding(encrypted_embedding: str) -> np.ndarray:
     return vector
 
 
-def compare_embeddings(stored: np.ndarray, current: np.ndarray) -> tuple[bool, float]:
+def compare_embeddings(
+    stored: np.ndarray,
+    current: np.ndarray,
+    threshold: float | None = None,
+) -> tuple[bool, float]:
     stored_vector = np.asarray(stored, dtype=np.float32)
     current_vector = np.asarray(current, dtype=np.float32)
     if stored_vector.shape != (128,) or current_vector.shape != (128,):
         return False, 0.0
     score = float(np.dot(stored_vector, current_vector))
-    try:
-        threshold = float(os.getenv("FACE_SIMILARITY_THRESHOLD", "0.363"))
-    except ValueError as exc:
-        raise FaceServiceUnavailable("FACE_SIMILARITY_THRESHOLD must be a number.") from exc
+    if threshold is None:
+        try:
+            threshold = float(os.getenv("FACE_SIMILARITY_THRESHOLD", "0.363"))
+        except ValueError as exc:
+            raise FaceServiceUnavailable("FACE_SIMILARITY_THRESHOLD must be a number.") from exc
     if not -1.0 <= threshold <= 1.0:
         raise FaceServiceUnavailable("FACE_SIMILARITY_THRESHOLD must be between -1 and 1.")
     return bool(np.isfinite(score) and score >= threshold), score
