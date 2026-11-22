@@ -500,7 +500,16 @@ class HolidayUpdate(BaseModel):
 
 
 AttendanceAction = Literal["punch_in", "punch_out", "break_start", "break_end"]
-ChallengeAction = Literal["enrollment", "punch_in", "punch_out", "break_start", "break_end"]
+ChallengeAction = Literal[
+    "enrollment",
+    "punch_in",
+    "punch_out",
+    "break_start",
+    "break_end",
+    "lecture_punch_in",
+    "lecture_punch_out",
+    "test_verification",
+]
 
 
 class ChallengeRequest(BaseModel):
@@ -512,6 +521,19 @@ class BiometricEnrollmentRequest(BaseModel):
     frames: list[str] = Field(min_length=4, max_length=12)
     face_image_base64: str = Field(min_length=100, max_length=7_000_000)
     consent: bool
+
+    @model_validator(mode="after")
+    def face_image_in_liveness_sequence(self):
+        _validate_capture_frames(self.frames)
+        if self.face_image_base64 not in self.frames:
+            raise ValueError("The face image must be one of the liveness frames.")
+        return self
+
+
+class BiometricVerifyRequest(BaseModel):
+    challenge_token: str = Field(min_length=32, max_length=100)
+    frames: list[str] = Field(min_length=4, max_length=12)
+    face_image_base64: str = Field(min_length=100, max_length=7_000_000)
 
     @model_validator(mode="after")
     def face_image_in_liveness_sequence(self):
@@ -549,16 +571,20 @@ class LectureAttendanceActionRequest(BaseModel):
     source_type: Literal["weekly", "additional"]
     schedule_id: int = Field(gt=0)
     lecture_date: date
-    challenge_token: str = Field(min_length=32, max_length=100)
-    frames: list[str] = Field(min_length=4, max_length=12)
-    face_image_base64: str = Field(min_length=100, max_length=7_000_000)
+    challenge_token: str | None = Field(default=None, min_length=32, max_length=100)
+    frames: list[str] | None = Field(default=None, min_length=4, max_length=12)
+    face_image_base64: str | None = Field(default=None, min_length=100, max_length=7_000_000)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    accuracy: float | None = Field(default=None, gt=0, le=5000)
     idempotency_key: str = Field(min_length=16, max_length=80)
 
     @model_validator(mode="after")
     def face_image_in_liveness_sequence(self):
-        _validate_capture_frames(self.frames)
-        if self.face_image_base64 not in self.frames:
-            raise ValueError("The face image must be one of the liveness frames.")
+        if self.frames is not None:
+            _validate_capture_frames(self.frames)
+            if self.face_image_base64 and self.face_image_base64 not in self.frames:
+                raise ValueError("The face image must be one of the liveness frames.")
         return self
 
 
@@ -3251,6 +3277,139 @@ def create_app() -> FastAPI:
         )
         db.commit()
 
+    @app.get("/faculty/biometrics/profile")
+    def get_faculty_biometric_profile(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(
+                models.BiometricTemplate.user_id == user.id,
+                models.BiometricTemplate.college_id == user.college_id,
+            )
+            .first()
+        )
+        reviewer_name = None
+        if template and template.approved_by:
+            rev = db.query(models.User.full_name).filter(models.User.id == template.approved_by).first()
+            if rev:
+                reviewer_name = rev[0]
+
+        policy = _active_policy(db, user.college_id)
+        threshold = getattr(policy, "face_match_threshold", 0.363) if policy else 0.363
+
+        logs = (
+            db.query(models.BiometricVerificationLog)
+            .filter(
+                models.BiometricVerificationLog.user_id == user.id,
+                models.BiometricVerificationLog.college_id == user.college_id,
+            )
+            .order_by(models.BiometricVerificationLog.created_at.desc())
+            .limit(20)
+            .all()
+        )
+
+        total_attempts = len(logs)
+        pass_count = sum(1 for l in logs if l.result == models.VerificationResult.PASS)
+        fail_count = sum(1 for l in logs if l.result == models.VerificationResult.FAIL)
+        accuracy_rate = round((pass_count / total_attempts * 100), 1) if total_attempts > 0 else 100.0
+
+        history = (
+            db.query(models.BiometricEnrollment)
+            .filter(models.BiometricEnrollment.user_id == user.id)
+            .order_by(models.BiometricEnrollment.created_at.desc())
+            .limit(10)
+            .all()
+        )
+
+        return {
+            "user_id": user.id,
+            "full_name": user.full_name,
+            "employee_id": user.employee_id,
+            "face_enrolled": bool(user.face_enrolled),
+            "enrollment_status": template.enrollment_status.value if template else "not_enrolled",
+            "enrolled_at": template.enrolled_at.isoformat() if (template and template.enrolled_at) else None,
+            "approved_at": template.approved_at.isoformat() if (template and template.approved_at) else None,
+            "approved_by": reviewer_name,
+            "algorithm": "SFace 128D (FaceRecognizerSF)",
+            "anti_spoofing": "MiniFASNet Neural Liveness",
+            "encryption": "AES-256 (Fernet) Biometric Protection",
+            "match_threshold": threshold,
+            "stats": {
+                "total_attempts": total_attempts,
+                "pass_count": pass_count,
+                "fail_count": fail_count,
+                "accuracy_rate": accuracy_rate,
+            },
+            "recent_verifications": [
+                {
+                    "id": l.id,
+                    "action": l.action,
+                    "result": l.result.value if hasattr(l.result, "value") else str(l.result),
+                    "similarity_score": round(l.similarity_score, 4) if l.similarity_score is not None else None,
+                    "liveness_score": round(l.liveness_score, 4) if l.liveness_score is not None else None,
+                    "failure_reason": l.failure_reason,
+                    "created_at": l.created_at.strftime("%Y-%m-%d %I:%M %p") if l.created_at else None,
+                }
+                for l in logs
+            ],
+            "enrollment_history": [
+                {
+                    "id": eh.id,
+                    "status": eh.status.value if hasattr(eh.status, "value") else str(eh.status),
+                    "created_at": eh.created_at.isoformat() if eh.created_at else None,
+                    "reviewed_at": eh.reviewed_at.isoformat() if eh.reviewed_at else None,
+                    "review_reason": eh.review_reason,
+                }
+                for eh in history
+            ],
+        }
+
+    @app.post("/faculty/biometrics/test-verify")
+    def test_verify_faculty_biometrics(
+        payload: BiometricVerifyRequest,
+        request: Request,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        template = (
+            db.query(models.BiometricTemplate)
+            .filter(
+                models.BiometricTemplate.user_id == user.id,
+                models.BiometricTemplate.college_id == user.college_id,
+                models.BiometricTemplate.enrollment_status == models.BiometricStatus.APPROVED,
+                models.BiometricTemplate.face_embedding.isnot(None),
+            )
+            .first()
+        )
+        if not template:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No approved biometric template found. Please complete face enrollment first.",
+            )
+
+        matched, score, liveness_score, _ = _verify_face(
+            db=db,
+            user=user,
+            action="test_verification",
+            token=payload.challenge_token,
+            frames=payload.frames,
+            face_image=payload.face_image_base64,
+            request=request,
+        )
+
+        policy = _active_policy(db, user.college_id)
+        threshold = getattr(policy, "face_match_threshold", 0.363) if policy else 0.363
+
+        return {
+            "matched": matched,
+            "similarity_score": round(score, 4) if score is not None else None,
+            "liveness_score": round(liveness_score, 4) if liveness_score is not None else None,
+            "threshold": threshold,
+            "message": "Face verification successful! Matches stored template in database." if matched else "Face mismatch: Verification threshold not met.",
+        }
+
     @app.get("/admin/biometrics/pending")
     def pending_biometric_enrollments(
         admin: models.User = Depends(require_roles(models.UserRole.SUPER_ADMIN, models.UserRole.HOD)),
@@ -4432,6 +4591,417 @@ def create_app() -> FastAPI:
             "pending_additional_lectures": pending_additional_lectures,
         }
 
+    @app.get("/faculty/dashboard")
+    def faculty_dashboard(
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        now = _attendance_now()
+        today = now.date()
+        weekday = today.weekday()
+
+        # 1. Faculty Profile & Biometrics
+        bio = db.query(models.BiometricTemplate).filter(
+            models.BiometricTemplate.user_id == user.id,
+            models.BiometricTemplate.college_id == user.college_id,
+        ).first()
+        bio_status = bio.enrollment_status.value if (bio and hasattr(bio.enrollment_status, "value")) else ("approved" if user.face_enrolled else "not_enrolled")
+
+        # 2. Hourly Rate & Payment Configuration
+        rate = db.query(models.FacultyPaymentRate).filter(
+            models.FacultyPaymentRate.college_id == user.college_id,
+            or_(models.FacultyPaymentRate.faculty_id == user.id, models.FacultyPaymentRate.faculty_id.is_(None))
+        ).order_by(models.FacultyPaymentRate.faculty_id.desc()).first()
+
+        rate_per_lecture = rate.rate_per_lecture if rate else 1500.0
+        rate_per_hour = rate.rate_per_hour if rate else 1000.0
+
+        # 3. Today's Lectures (Weekly + Additional)
+        weekly = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == user.college_id,
+            models.WeeklyLecture.day_of_week == weekday,
+            models.WeeklyLecture.is_active.is_(True),
+            or_(models.WeeklyLecture.user_id == user.id, models.WeeklyLecture.substitute_faculty_id == user.id)
+        ).all()
+
+        addl = db.query(models.AdditionalLectureRequest).filter(
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.lecture_date == today,
+            models.AdditionalLectureRequest.status == "approved",
+        ).all()
+
+        records = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.user_id == user.id,
+            models.LectureAttendanceRecord.lecture_date == today,
+        ).all()
+        rec_by_weekly = {r.weekly_lecture_id: r for r in records if r.weekly_lecture_id}
+        rec_by_addl = {r.additional_lecture_request_id: r for r in records if r.additional_lecture_request_id}
+
+        policy = _active_policy(db, user.college_id)
+        punch_in_win = getattr(policy, "lecture_punch_in_window_minutes", 15) or 15
+        punch_out_win = getattr(policy, "lecture_punch_out_window_minutes", 15) or 15
+
+        today_items = []
+        for w in weekly:
+            rec = rec_by_weekly.get(w.id)
+            is_sub = (w.substitute_faculty_id == user.id)
+            st_dt = datetime.combine(today, w.start_time)
+            et_dt = datetime.combine(today, w.end_time)
+
+            can_in = (rec is None or rec.punch_in_time is None) and (st_dt - timedelta(minutes=punch_in_win) <= now <= et_dt)
+            can_out = (rec is not None and rec.punch_in_time is not None and rec.punch_out_time is None) and (rec.punch_in_time <= now <= et_dt + timedelta(minutes=punch_out_win))
+
+            if rec and rec.punch_out_time:
+                item_status = "completed"
+            elif rec and rec.punch_in_time:
+                item_status = "in_progress"
+            elif now > et_dt and not rec:
+                item_status = "missed"
+            elif now < st_dt:
+                item_status = "upcoming"
+            else:
+                item_status = "scheduled"
+
+            subj_title = w.subject or (w.subject_rel.name if getattr(w, "subject_rel", None) else "Lecture")
+            course_title = w.course_name or (w.course_rel.name if getattr(w, "course_rel", None) else None)
+            room_title = w.room or (w.classroom.room_number if getattr(w, "classroom", None) else None)
+
+            today_items.append({
+                "source_type": "weekly",
+                "schedule_id": w.id,
+                "subject": subj_title,
+                "course_name": course_title,
+                "room": room_title,
+                "department": w.department.name if w.department else None,
+                "start_time": w.start_time.strftime("%H:%M"),
+                "end_time": w.end_time.strftime("%H:%M"),
+                "is_substitute": is_sub,
+                "status": item_status,
+                "can_punch_in": can_in,
+                "can_punch_out": can_out,
+                "punch_in_time": rec.punch_in_time.strftime("%H:%M") if (rec and rec.punch_in_time) else None,
+                "punch_out_time": rec.punch_out_time.strftime("%H:%M") if (rec and rec.punch_out_time) else None,
+            })
+
+        for a in addl:
+            rec = rec_by_addl.get(a.id)
+            st = datetime.strptime(a.start_time, "%H:%M").time() if isinstance(a.start_time, str) else a.start_time
+            et = datetime.strptime(a.end_time, "%H:%M").time() if isinstance(a.end_time, str) else a.end_time
+            st_dt = datetime.combine(today, st)
+            et_dt = datetime.combine(today, et)
+
+            can_in = (rec is None or rec.punch_in_time is None) and (st_dt - timedelta(minutes=punch_in_win) <= now <= et_dt)
+            can_out = (rec is not None and rec.punch_in_time is not None and rec.punch_out_time is None) and (rec.punch_in_time <= now <= et_dt + timedelta(minutes=punch_out_win))
+
+            if rec and rec.punch_out_time:
+                item_status = "completed"
+            elif rec and rec.punch_in_time:
+                item_status = "in_progress"
+            elif now > et_dt and not rec:
+                item_status = "missed"
+            elif now < st_dt:
+                item_status = "upcoming"
+            else:
+                item_status = "scheduled"
+
+            today_items.append({
+                "source_type": "additional",
+                "schedule_id": a.id,
+                "subject": a.subject,
+                "course_name": "Additional Lecture",
+                "room": a.room,
+                "department": user.department.name if user.department else None,
+                "start_time": st.strftime("%H:%M"),
+                "end_time": et.strftime("%H:%M"),
+                "is_substitute": False,
+                "status": item_status,
+                "can_punch_in": can_in,
+                "can_punch_out": can_out,
+                "punch_in_time": rec.punch_in_time.strftime("%H:%M") if (rec and rec.punch_in_time) else None,
+                "punch_out_time": rec.punch_out_time.strftime("%H:%M") if (rec and rec.punch_out_time) else None,
+            })
+
+        today_items.sort(key=lambda x: x["start_time"])
+        next_candidates = [item for item in today_items if item["status"] in ("upcoming", "scheduled", "in_progress")]
+        next_lecture = next_candidates[0] if next_candidates else None
+
+        # 4. Monthly & Weekly Metrics
+        month_start = today.replace(day=1)
+        month_records = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.user_id == user.id,
+            models.LectureAttendanceRecord.lecture_date >= month_start,
+            models.LectureAttendanceRecord.lecture_date <= today,
+            models.LectureAttendanceRecord.punch_out_time.isnot(None),
+        ).all()
+
+        month_lectures_done = len(month_records)
+        month_taught_hours = 0.0
+        for r in month_records:
+            if r.punch_in_time and r.punch_out_time:
+                month_taught_hours += (r.punch_out_time - r.punch_in_time).total_seconds() / 3600.0
+
+        estimated_earnings = round(month_lectures_done * rate_per_lecture, 2)
+
+        # 5. Pending Substitute Requests for this Faculty (Phase 10)
+        pending_subs = db.query(models.SubstituteAssignment).filter(
+            models.SubstituteAssignment.college_id == user.college_id,
+            models.SubstituteAssignment.substitute_faculty_id == user.id,
+            models.SubstituteAssignment.status == "pending",
+        ).all()
+        sub_items = []
+        for s in pending_subs:
+            lec = s.lecture
+            orig_fac = s.original_faculty
+            ldate = getattr(s, "lecture_date", None) or getattr(s, "date", None)
+            sub_items.append({
+                "id": s.id,
+                "date": ldate.isoformat() if ldate else "",
+                "subject": lec.subject if lec else "Lecture Session",
+                "time": f"{lec.start_time.strftime('%H:%M')} - {lec.end_time.strftime('%H:%M')}" if lec else "Scheduled Time",
+                "original_faculty_name": orig_fac.full_name if orig_fac else "Colleague",
+                "reason": getattr(s, "remarks", None) or getattr(s, "reason", None) or "Substitute request",
+            })
+
+        # 6. Active Institutional Announcements (Phase 11)
+        announcements = db.query(models.Announcement).filter(
+            models.Announcement.college_id == user.college_id,
+            models.Announcement.is_active.is_(True),
+            or_(models.Announcement.target_role.is_(None), models.Announcement.target_role == "faculty"),
+            or_(models.Announcement.target_department_id.is_(None), models.Announcement.target_department_id == user.department_id),
+        ).order_by(models.Announcement.created_at.desc()).limit(3).all()
+
+        announcement_items = [
+            {
+                "id": an.id,
+                "title": an.title,
+                "message": an.message,
+                "type": an.type,
+                "priority": an.priority or "normal",
+                "created_at": an.created_at.isoformat() if an.created_at else None,
+            }
+            for an in announcements
+        ]
+
+        # 7. General Day Workday Attendance
+        day_att = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.college_id == user.college_id,
+            models.AttendanceRecord.user_id == user.id,
+            models.AttendanceRecord.date == today,
+        ).first()
+
+        return {
+            "faculty": {
+                "id": user.id,
+                "full_name": user.full_name,
+                "employee_id": user.employee_id,
+                "email": user.email,
+                "designation": user.designation or "Visiting Faculty",
+                "department": user.department.name if user.department else "General",
+                "face_enrolled": bool(user.face_enrolled),
+                "biometric_status": bio_status,
+            },
+            "today_stats": {
+                "assigned_lectures": len(today_items),
+                "completed_lectures": sum(1 for x in today_items if x["status"] == "completed"),
+                "upcoming_lectures": sum(1 for x in today_items if x["status"] in ("upcoming", "scheduled", "in_progress")),
+            },
+            "financial_stats": {
+                "month_completed_lectures": month_lectures_done,
+                "month_taught_hours": round(month_taught_hours, 1),
+                "rate_per_lecture": rate_per_lecture,
+                "rate_per_hour": rate_per_hour,
+                "estimated_monthly_earnings": estimated_earnings,
+            },
+            "next_lecture": next_lecture,
+            "today_lectures": today_items,
+            "pending_substitutes": sub_items,
+            "announcements": announcement_items,
+            "day_attendance": {
+                "punched_in": day_att.punch_in_time.strftime("%I:%M %p") if (day_att and day_att.punch_in_time) else None,
+                "punched_out": day_att.punch_out_time.strftime("%I:%M %p") if (day_att and day_att.punch_out_time) else None,
+                "status": day_att.status.value if (day_att and hasattr(day_att.status, "value")) else ("PRESENT" if day_att else "NOT_PUNCHED"),
+            },
+        }
+
+    @app.get("/faculty/attendance/tracker")
+    def faculty_attendance_tracker(
+        month: int | None = None,
+        year: int | None = None,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        now = _attendance_now()
+        cur_year = year if year else now.year
+        cur_month = month if (month is not None and 1 <= month <= 12) else now.month
+
+        # Calculate month date range
+        start_date = date(cur_year, cur_month, 1)
+        next_month = start_date.replace(day=28) + timedelta(days=4)
+        end_date = next_month - timedelta(days=next_month.day)
+
+        # 1. Fetch Visiting Faculty Payment Rates from DB
+        rate = db.query(models.FacultyPaymentRate).filter(
+            models.FacultyPaymentRate.college_id == user.college_id,
+            or_(models.FacultyPaymentRate.faculty_id == user.id, models.FacultyPaymentRate.faculty_id.is_(None))
+        ).order_by(models.FacultyPaymentRate.faculty_id.desc()).first()
+
+        rate_per_lecture = rate.rate_per_lecture if rate else 1500.0
+        rate_per_hour = rate.rate_per_hour if rate else 1000.0
+
+        # 2. Query Lecture Attendance Records for this month from DB
+        lec_records = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.user_id == user.id,
+            models.LectureAttendanceRecord.lecture_date >= start_date,
+            models.LectureAttendanceRecord.lecture_date <= end_date,
+        ).order_by(models.LectureAttendanceRecord.lecture_date.desc(), models.LectureAttendanceRecord.punch_in_time.desc()).all()
+
+        # 3. Query Location Verification Logs from DB to check geofence adherence
+        loc_logs = db.query(models.LocationVerificationLog).filter(
+            models.LocationVerificationLog.college_id == user.college_id,
+            models.LocationVerificationLog.user_id == user.id,
+            models.LocationVerificationLog.created_at >= datetime.combine(start_date, time_type.min),
+            models.LocationVerificationLog.created_at <= datetime.combine(end_date, time_type.max),
+        ).all()
+        loc_log_by_date = {}
+        for l in loc_logs:
+            d = l.created_at.date()
+            loc_log_by_date.setdefault(d, []).append(l)
+
+        # 4. Format Lecture Attendance Items
+        lectures_list = []
+        total_taught_seconds = 0
+        conducted_count = 0
+        face_verified_count = 0
+        gps_verified_count = 0
+
+        for r in lec_records:
+            subj = "Lecture Session"
+            course = "Course"
+            room = "Classroom"
+            sch_st = None
+            sch_et = None
+
+            if r.weekly_lecture:
+                subj = r.weekly_lecture.subject or (r.weekly_lecture.subject_rel.name if getattr(r.weekly_lecture, "subject_rel", None) else "Lecture")
+                course = r.weekly_lecture.course_name or (r.weekly_lecture.course_rel.name if getattr(r.weekly_lecture, "course_rel", None) else "Department Course")
+                room = r.weekly_lecture.room or (r.weekly_lecture.classroom.room_number if getattr(r.weekly_lecture, "classroom", None) else "LH-101")
+                sch_st = r.weekly_lecture.start_time.strftime("%H:%M") if r.weekly_lecture.start_time else None
+                sch_et = r.weekly_lecture.end_time.strftime("%H:%M") if r.weekly_lecture.end_time else None
+            elif r.additional_lecture_request:
+                subj = r.additional_lecture_request.subject
+                course = "Additional Lecture"
+                room = r.additional_lecture_request.room
+                sch_st = r.additional_lecture_request.start_time
+                sch_et = r.additional_lecture_request.end_time
+
+            duration_mins = 0
+            if r.punch_in_time and r.punch_out_time:
+                duration_mins = int((r.punch_out_time - r.punch_in_time).total_seconds() // 60)
+                total_taught_seconds += (r.punch_out_time - r.punch_in_time).total_seconds()
+
+            if r.punch_out_time:
+                item_status = "completed"
+                conducted_count += 1
+            elif r.punch_in_time:
+                item_status = "in_progress"
+            else:
+                item_status = "missed"
+
+            # Check Face verification
+            face_ok = bool(r.punch_in_face_verified)
+            if face_ok:
+                face_verified_count += 1
+
+            # Check GPS logs for that day
+            day_locs = loc_log_by_date.get(r.lecture_date, [])
+            gps_pass = any(x.result == models.VerificationResult.PASS for x in day_locs) if day_locs else True
+            if gps_pass:
+                gps_verified_count += 1
+
+            lectures_list.append({
+                "record_id": r.id,
+                "schedule_id": r.weekly_lecture_id or r.additional_lecture_request_id,
+                "source_type": "weekly" if r.weekly_lecture_id else "additional",
+                "date": r.lecture_date.isoformat(),
+                "subject": subj,
+                "course_name": course,
+                "room": room,
+                "scheduled_start": sch_st,
+                "scheduled_end": sch_et,
+                "punch_in_time": r.punch_in_time.strftime("%I:%M %p") if r.punch_in_time else None,
+                "punch_out_time": r.punch_out_time.strftime("%I:%M %p") if r.punch_out_time else None,
+                "duration_minutes": duration_mins,
+                "status": item_status,
+                "face_verified": face_ok,
+                "gps_verified": gps_pass,
+            })
+
+        # 5. Query Campus Day Records from DB
+        campus_records = db.query(models.AttendanceRecord).filter(
+            models.AttendanceRecord.college_id == user.college_id,
+            models.AttendanceRecord.user_id == user.id,
+            models.AttendanceRecord.date >= start_date,
+            models.AttendanceRecord.date <= end_date,
+        ).order_by(models.AttendanceRecord.date.desc()).all()
+
+        campus_days = [
+            {
+                "id": cr.id,
+                "date": cr.date.isoformat(),
+                "punch_in_time": cr.punch_in_time.strftime("%I:%M %p") if cr.punch_in_time else None,
+                "punch_out_time": cr.punch_out_time.strftime("%I:%M %p") if cr.punch_out_time else None,
+                "status": cr.status.value if hasattr(cr.status, "value") else str(cr.status),
+                "total_working_minutes": cr.total_working_minutes or 0,
+                "net_working_minutes": cr.net_working_minutes or 0,
+                "is_late": bool(cr.is_late),
+                "is_early_departure": bool(cr.is_early_departure),
+            }
+            for cr in campus_records
+        ]
+
+        # 6. Policy & Campus Location from DB
+        policy = _active_policy(db, user.college_id)
+        campus_loc = db.query(models.CollegeLocation).filter(
+            models.CollegeLocation.college_id == user.college_id,
+            models.CollegeLocation.is_active == True,
+        ).first()
+
+        taught_hours = round(total_taught_seconds / 3600.0, 1)
+        est_earnings = round(conducted_count * rate_per_lecture, 2)
+        total_slots = len(lectures_list)
+        bio_pct = round((face_verified_count / total_slots * 100), 1) if total_slots > 0 else 100.0
+        gps_pct = round((gps_verified_count / total_slots * 100), 1) if total_slots > 0 else 100.0
+
+        return {
+            "month": cur_month,
+            "year": cur_year,
+            "kpis": {
+                "total_lectures_conducted": conducted_count,
+                "total_hours_taught": taught_hours,
+                "biometric_compliance_pct": bio_pct,
+                "geofence_compliance_pct": gps_pct,
+                "rate_per_lecture": rate_per_lecture,
+                "rate_per_hour": rate_per_hour,
+                "estimated_earnings": est_earnings,
+            },
+            "lectures": lectures_list,
+            "campus_days": campus_days,
+            "policy": {
+                "require_face_for_punch_in": getattr(policy, "require_face_for_punch_in", True),
+                "require_face_for_punch_out": getattr(policy, "require_face_for_punch_out", True),
+                "require_gps_for_punch_in": getattr(policy, "require_gps_for_punch_in", True),
+                "require_gps_for_punch_out": getattr(policy, "require_gps_for_punch_out", True),
+                "geofence_radius": campus_loc.geofence_radius if campus_loc else 100.0,
+                "campus_latitude": campus_loc.latitude if campus_loc else 23.0225,
+                "campus_longitude": campus_loc.longitude if campus_loc else 72.5714,
+                "campus_name": campus_loc.name if campus_loc else "Apex Main Campus",
+            }
+        }
+
     @app.get("/timetable/mine")
     def my_timetable(
         user: models.User = Depends(get_current_user),
@@ -4644,7 +5214,22 @@ def create_app() -> FastAPI:
                 models.WeeklyLecture.is_active.is_(True),
             ).first()
             if lecture is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled lecture not found.")
+                # Check if user is an accepted substitute faculty for this lecture & date
+                sub_assign = db.query(models.SubstituteAssignment).filter(
+                    models.SubstituteAssignment.lecture_id == payload.schedule_id,
+                    models.SubstituteAssignment.substitute_faculty_id == user.id,
+                    models.SubstituteAssignment.college_id == user.college_id,
+                    models.SubstituteAssignment.lecture_date == payload.lecture_date,
+                    models.SubstituteAssignment.status == "accepted",
+                ).first()
+                if sub_assign:
+                    lecture = db.query(models.WeeklyLecture).filter(
+                        models.WeeklyLecture.id == payload.schedule_id,
+                        models.WeeklyLecture.college_id == user.college_id,
+                        models.WeeklyLecture.is_active.is_(True),
+                    ).first()
+            if lecture is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scheduled lecture not found or you are not authorized to conduct it.")
             start_time = lecture.start_time
             end_time = lecture.end_time
             weekly_lecture_id = lecture.id
@@ -4708,15 +5293,33 @@ def create_app() -> FastAPI:
 
         record = record_query.with_for_update().first()
         validate_action_window(_attendance_now(), record)
-        face_verified, _, _, _ = _verify_face(
-            db,
-            user,
-            action,
-            payload.challenge_token,
-            payload.frames,
-            payload.face_image_base64,
-            request,
-        )
+
+        # GPS Geofence Verification if required or coordinates provided
+        if _policy_requires(policy, action, "gps") or (payload.latitude is not None and payload.longitude is not None):
+            temp_loc_req = AttendanceActionRequest(
+                latitude=payload.latitude,
+                longitude=payload.longitude,
+                accuracy=payload.accuracy or 10.0,
+                idempotency_key=payload.idempotency_key,
+            )
+            _verify_location(db, user, f"lecture_{action}", temp_loc_req)
+
+        # Face Biometric Verification if required or frames supplied
+        face_verified = False
+        if _policy_requires(policy, action, "face") or (payload.frames and payload.face_image_base64):
+            if not payload.challenge_token or not payload.frames or not payload.face_image_base64:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Face biometric capture is required by college attendance policy.")
+            face_verified, _, _, _ = _verify_face(
+                db,
+                user,
+                action,
+                payload.challenge_token,
+                payload.frames,
+                payload.face_image_base64,
+                request,
+            )
+        else:
+            face_verified = bool(user.face_enrolled)
 
         now = _attendance_now()
         record = record_query.with_for_update().first()

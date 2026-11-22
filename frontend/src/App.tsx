@@ -8,10 +8,13 @@ import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens }
 import { useClock, useReloadable } from './hooks'
 import { AdminSidebar, AdminTopBar, ADMIN_NAV_GROUPS } from './AdminComponents'
 import { AdminViewDispatcher } from './AdminViewDispatcher'
+import { FacultyDashboardPage } from './FacultyDashboardPage'
+import { FacultyAttendanceTrackerPage } from './FacultyAttendanceTrackerPage'
+import { FacultyBiometricsPage } from './FacultyBiometricsPage'
 
 type Role = 'super_admin' | 'college_admin' | 'hod' | 'attendance_manager' | 'read_only_admin' | 'faculty' | 'staff'
 type Portal = 'admin' | 'user'
-type User = {
+export type User = {
   id: number
   employee_id: string
   full_name: string
@@ -589,7 +592,7 @@ function Dasboard ({ user, navigate }: { user: User; navigate: (page: string) =>
   )
 }
 
-function UserDashboard({ user, navigate }: { user: User; navigate: (page: string) => void }) {
+export function UserDashboard({ user, navigate }: { user: User; navigate: (page: string) => void }) {
   const selectedDate = localDate()
   const {
     data: notifications,
@@ -837,7 +840,7 @@ function StatusBadge({ status }: { status?: string | null }) {
   return <span className={`badge badge-${status || 'unknown'}`}><span className="status-dot" />{statusLabel(status)}</span>
 }
 
-function CaptureDialog({ instruction, title, captureLabel, consent, onConsentChange, busy, onCancel, onCapture }: {
+export function CaptureDialog({ instruction, title, captureLabel, consent, onConsentChange, busy, onCancel, onCapture }: {
   instruction?: string
   title?: string
   captureLabel?: string
@@ -931,7 +934,7 @@ function CaptureDialog({ instruction, title, captureLabel, consent, onConsentCha
   )
 }
 
-function getLocation(): Promise<{ latitude: number; longitude: number; accuracy: number }> {
+export function getLocation(): Promise<{ latitude: number; longitude: number; accuracy: number }> {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) {
       reject(new Error('Location services are unavailable in this browser.'))
@@ -1050,7 +1053,7 @@ function AttendancePage() {
   )
 }
 
-function EnrollmentPage({ user, onUserUpdate, onComplete }: { user: User; onUserUpdate: (user: User) => void; onComplete: () => void }) {
+export function EnrollmentPage({ user, onUserUpdate, onComplete }: { user: User; onUserUpdate: (user: User) => void; onComplete: () => void }) {
   const [status, setStatus] = useState(user.face_enrollment_status)
   const [challenge, setChallenge] = useState<Challenge | null>(null)
   const [consent, setConsent] = useState(false)
@@ -1154,7 +1157,7 @@ type LeaveApplication = {
   created_at: string
 }
 
-function AttendanceTrackerPage({ user }: { user: User }) {
+export function AttendanceTrackerPage({ user }: { user: User }) {
   const [selectedMonth, setSelectedMonth] = useState(() => new Date().getMonth())
   const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear())
   const [showDetails, setShowDetails] = useState(false)
@@ -2224,19 +2227,19 @@ function App() {
         <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumbs"><span>AttendEase</span><ChevronRight size={14} /><strong>{navigation.find((item) => item.key === page)?.label || 'Dasboard '}</strong></div><div className="topbar-user"><div className="topbar-avatar">{user.full_name.slice(0, 1)}</div><div className="topbar-user-copy"><strong>{user.full_name}</strong><span>{user.employee_id}</span></div><button className="icon-button" title="Sign out" onClick={() => void signOut()}><LogOut size={17} /></button></div></header>
         {logoutError && <div className="logout-warning">{logoutError}</div>}
         {pageMessage && <div className="notice notice-success"><Check size={17} />{pageMessage}</div>}
-        {page === 'Dasboard ' && (isManager(user.role) ? <Dasboard  user={user} navigate={selectPage} /> : <UserDashboard user={user} navigate={selectPage} />)}
+        {page === 'Dasboard ' && (isManager(user.role) ? <Dasboard  user={user} navigate={selectPage} /> : <FacultyDashboardPage user={user} navigate={selectPage} />)}
         {page === 'timetable' && <TimetablePage user={user} />}
-        {page === 'attendance' && <AttendancePage />}
-        {page === 'attendance_tracker' && <AttendanceTrackerPage user={user} />}
+        {page === 'attendance' && <FacultyAttendanceTrackerPage user={user} />}
+        {page === 'attendance_tracker' && <FacultyAttendanceTrackerPage user={user} />}
         {page === 'additional_lectures' && <AdditionalLecturesPage user={user} />}
         {page === 'tasks' && <TasksPage user={user} selectedProjectId={selectedProjectId} />}
         {page === 'projects' && <ProjectsPage user={user} navigate={selectPage} />}
-        {page === 'enrollment' && <EnrollmentPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
+        {page === 'enrollment' && <FacultyBiometricsPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
         {page === 'leave' && <LeavePage user={user} />}
         {page === 'directory' && <DirectoryPage />}
         {page === 'notifications' && <NotificationsPage />}
         {page === 'profile' && <ProfilePage user={user} />}
-        {!navigation.some((item) => item.key === page) && <UserDashboard user={user} navigate={selectPage} />}
+        {!navigation.some((item) => item.key === page) && <FacultyDashboardPage user={user} navigate={selectPage} />}
         <footer className="app-footer"><span>AttendEase · College attendance</span><span><ShieldCheck size={14} /> Secure session</span></footer>
       </main>
     </div>
