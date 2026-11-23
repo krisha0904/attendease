@@ -6805,6 +6805,31 @@ def create_app() -> FastAPI:
         )
         return [_attendance_correction_payload(c) for c in rows]
 
+    @app.delete("/attendance-corrections/{correction_id}")
+    def cancel_my_attendance_correction(
+        correction_id: int,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        corr = (
+            db.query(models.AttendanceCorrection)
+            .filter(
+                models.AttendanceCorrection.id == correction_id,
+                models.AttendanceCorrection.faculty_id == user.id,
+                models.AttendanceCorrection.college_id == user.college_id,
+                models.AttendanceCorrection.status == "pending",
+            )
+            .first()
+        )
+        if not corr:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Pending attendance correction not found.",
+            )
+        db.delete(corr)
+        db.commit()
+        return {"message": "Attendance correction request cancelled successfully."}
+
     # =========================================================================
     # PHASE 8: FACULTY AVAILABILITY MANAGEMENT ENDPOINTS
     # =========================================================================
@@ -7110,6 +7135,30 @@ def create_app() -> FastAPI:
             .all()
         )
         return [_faculty_availability_payload(a) for a in rows]
+
+    @app.delete("/faculty-availability/{avail_id}")
+    def delete_my_faculty_availability(
+        avail_id: int,
+        user: models.User = Depends(get_current_user),
+        db: Session = Depends(get_db),
+    ):
+        avail = (
+            db.query(models.FacultyAvailability)
+            .filter(
+                models.FacultyAvailability.id == avail_id,
+                models.FacultyAvailability.faculty_id == user.id,
+                models.FacultyAvailability.college_id == user.college_id,
+            )
+            .first()
+        )
+        if not avail:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Availability record not found.",
+            )
+        db.delete(avail)
+        db.commit()
+        return {"message": "Availability record deleted successfully."}
 
     # =========================================================================
     # PHASE 2: VISITING FACULTY MANAGEMENT ENDPOINTS

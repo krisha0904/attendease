@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
 import {
   Activity, ArrowDownToLine, Bell, Building2, CalendarDays, Camera, Check, ChevronRight,
-  BookOpen, CalendarPlus, CircleHelp, Clock3, Fingerprint, FolderOpen, MapPin,
-  KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserRound, Users, X,
+  BookOpen, CalendarPlus, CircleHelp, Clock3, FileEdit, Fingerprint, FolderOpen, MapPin,
+  KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserCheck, UserRound, Users, X,
 } from 'lucide-react'
 import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens } from './api'
 import { useClock, useReloadable } from './hooks'
@@ -11,6 +11,8 @@ import { AdminViewDispatcher } from './AdminViewDispatcher'
 import { FacultyDashboardPage } from './FacultyDashboardPage'
 import { FacultyAttendanceTrackerPage } from './FacultyAttendanceTrackerPage'
 import { FacultyBiometricsPage } from './FacultyBiometricsPage'
+import { FacultyAvailabilityPage } from './FacultyAvailabilityPage'
+import { FacultyCorrectionsPage } from './FacultyCorrectionsPage'
 
 type Role = 'super_admin' | 'college_admin' | 'hod' | 'attendance_manager' | 'read_only_admin' | 'faculty' | 'staff'
 type Portal = 'admin' | 'user'
@@ -146,6 +148,8 @@ const staffNavigation: NavItem[] = [
   { key: 'attendance_tracker', label: 'Attendance tracker', icon: Clock3 },
   { key: 'timetable', label: 'Timetable', icon: CalendarDays },
   { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
+  { key: 'availability', label: 'Teaching availability', icon: UserCheck },
+  { key: 'attendance_corrections', label: 'Attendance corrections', icon: FileEdit },
   { key: 'notifications', label: 'Notifications', icon: Bell },
   { key: 'profile', label: 'Profile & Settings', icon: Settings },
   { key: 'enrollment', label: 'Face verification', icon: Fingerprint },
@@ -2224,6 +2228,8 @@ function App() {
         {page === 'attendance' && <FacultyAttendanceTrackerPage user={user} />}
         {page === 'attendance_tracker' && <FacultyAttendanceTrackerPage user={user} />}
         {page === 'additional_lectures' && <AdditionalLecturesPage user={user} />}
+        {page === 'availability' && <FacultyAvailabilityPage user={user} />}
+        {page === 'attendance_corrections' && <FacultyCorrectionsPage user={user} />}
         {page === 'enrollment' && <FacultyBiometricsPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
         {page === 'directory' && <DirectoryPage />}
         {page === 'notifications' && <NotificationsPage />}
