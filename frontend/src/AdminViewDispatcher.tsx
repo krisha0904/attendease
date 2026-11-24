@@ -93,6 +93,8 @@ export function AdminViewDispatcher({
       return <NotificationHubPage />
 
     case 'reports':
+    case 'attendance_reports':
+    case 'attendance_report':
     case 'workload_payment':
       return <ReportsAnalyticsPage />
 

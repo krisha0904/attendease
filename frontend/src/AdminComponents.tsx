@@ -54,6 +54,7 @@ export const ADMIN_NAV_GROUPS: NavGroup[] = [
     title: 'Attendance Management',
     items: [
       { key: 'attendance', label: 'Attendance Management', icon: ClipboardCheck },
+      { key: 'attendance_reports', label: 'Attendance Audit Report', icon: Activity },
       { key: 'attendance_corrections', label: 'Attendance Corrections', icon: FileEdit },
       { key: 'availability', label: 'Availability Management', icon: UserCheck },
       { key: 'substitute_faculty', label: 'Substitute Faculty Management', icon: UserPlus },
@@ -70,7 +71,7 @@ export const ADMIN_NAV_GROUPS: NavGroup[] = [
     id: 'reports_finance',
     title: 'Reports & Finance',
     items: [
-      { key: 'reports', label: 'Reports & Analytics', icon: Activity },
+      { key: 'reports', label: 'Attendance & Payroll Audit Report', icon: Activity },
       { key: 'workload_payment', label: 'Workload & Payment Summary', icon: CreditCard },
       { key: 'import_export', label: 'Import & Export', icon: ArrowDownToLine },
     ],

@@ -1594,6 +1594,7 @@ def _lecture_occurrence_payload(
     return {
         "source_type": source_type,
         "schedule_id": schedule_id,
+        "record_id": record.id if record else 0,
         "lecture_date": lecture_date,
         "subject": subject,
         "course_name": course_name,
@@ -1609,6 +1610,8 @@ def _lecture_occurrence_payload(
         "not_worked_minutes": max(0, elapsed_scheduled_minutes - worked_minutes),
         "can_punch_in": can_punch_in,
         "can_punch_out": can_punch_out,
+        "face_verified": bool(record.punch_in_face_verified) if record else False,
+        "gps_verified": bool(record) if record else False,
         "punch_out_window_closed": bool(
             record
             and record.punch_in_time
@@ -1618,6 +1621,9 @@ def _lecture_occurrence_payload(
                 or is_today and now > ends_at + timedelta(minutes=15)
             )
         ),
+        "approval_status": getattr(record, "approval_status", "verified") if record else "pending",
+        "rejection_reason": getattr(record, "rejection_reason", None) if record else None,
+        "approved_at": record.approved_at.isoformat() if (record and getattr(record, "approved_at", None)) else None,
     }
 
 
@@ -4875,96 +4881,169 @@ def create_app() -> FastAPI:
         rate_per_lecture = rate.rate_per_lecture if rate else 1500.0
         rate_per_hour = rate.rate_per_hour if rate else 1000.0
 
-        # 2. Query Lecture Attendance Records for this month from DB
-        lec_records = db.query(models.LectureAttendanceRecord).filter(
-            models.LectureAttendanceRecord.college_id == user.college_id,
-            models.LectureAttendanceRecord.user_id == user.id,
-            models.LectureAttendanceRecord.lecture_date >= start_date,
-            models.LectureAttendanceRecord.lecture_date <= end_date,
-        ).order_by(models.LectureAttendanceRecord.lecture_date.desc(), models.LectureAttendanceRecord.punch_in_time.desc()).all()
+        # 2. Generate comprehensive calendar & lecture occurrences for this month
+        calendar = _lecture_calendar_payload(db, user, start_date, end_date, now)
 
-        # 3. Query Location Verification Logs from DB to check geofence adherence
-        loc_logs = db.query(models.LocationVerificationLog).filter(
-            models.LocationVerificationLog.college_id == user.college_id,
-            models.LocationVerificationLog.user_id == user.id,
-            models.LocationVerificationLog.created_at >= datetime.combine(start_date, time_type.min),
-            models.LocationVerificationLog.created_at <= datetime.combine(end_date, time_type.max),
-        ).all()
-        loc_log_by_date = {}
-        for l in loc_logs:
-            d = l.created_at.date()
-            loc_log_by_date.setdefault(d, []).append(l)
+        all_lectures = []
+        teaching_dates = set()
+        attended_dates = set()
 
-        # 4. Format Lecture Attendance Items
-        lectures_list = []
-        total_taught_seconds = 0
-        conducted_count = 0
+        scheduled_count = 0
+        completed_count = 0
+        upcoming_count = 0
+        missed_count = 0
+        in_progress_count = 0
+        late_in_count = 0
+        missing_punchout_count = 0
+
+        total_scheduled_minutes = 0
+        total_taught_minutes = 0
         face_verified_count = 0
         gps_verified_count = 0
+        punch_count = 0
 
-        for r in lec_records:
-            subj = "Lecture Session"
-            course = "Course"
-            room = "Classroom"
-            sch_st = None
-            sch_et = None
+        for day in calendar:
+            d_date = day["date"]
+            day_occurrences = day.get("lectures", [])
+            if day_occurrences:
+                teaching_dates.add(d_date)
 
-            if r.weekly_lecture:
-                subj = r.weekly_lecture.subject or (r.weekly_lecture.subject_rel.name if getattr(r.weekly_lecture, "subject_rel", None) else "Lecture")
-                course = r.weekly_lecture.course_name or (r.weekly_lecture.course_rel.name if getattr(r.weekly_lecture, "course_rel", None) else "Department Course")
-                room = r.weekly_lecture.room or (r.weekly_lecture.classroom.room_number if getattr(r.weekly_lecture, "classroom", None) else "LH-101")
-                sch_st = r.weekly_lecture.start_time.strftime("%H:%M") if r.weekly_lecture.start_time else None
-                sch_et = r.weekly_lecture.end_time.strftime("%H:%M") if r.weekly_lecture.end_time else None
-            elif r.additional_lecture_request:
-                subj = r.additional_lecture_request.subject
-                course = "Additional Lecture"
-                room = r.additional_lecture_request.room
-                sch_st = r.additional_lecture_request.start_time
-                sch_et = r.additional_lecture_request.end_time
+            for occ in day_occurrences:
+                scheduled_count += 1
+                sch_mins = occ.get("scheduled_minutes", 60)
+                total_scheduled_minutes += sch_mins
 
-            duration_mins = 0
-            if r.punch_in_time and r.punch_out_time:
-                duration_mins = int((r.punch_out_time - r.punch_in_time).total_seconds() // 60)
-                total_taught_seconds += (r.punch_out_time - r.punch_in_time).total_seconds()
+                st_str = occ.get("start_time", "00:00")
+                et_str = occ.get("end_time", "00:00")
+                s_t = None
+                e_t = None
+                try:
+                    s_t = datetime.strptime(st_str, "%H:%M").time()
+                    e_t = datetime.strptime(et_str, "%H:%M").time()
+                    st_disp = s_t.strftime("%I:%M %p")
+                    et_disp = e_t.strftime("%I:%M %p")
+                except Exception:
+                    st_disp = st_str
+                    et_disp = et_str
 
-            if r.punch_out_time:
-                item_status = "completed"
-                conducted_count += 1
-            elif r.punch_in_time:
-                item_status = "in_progress"
-            else:
-                item_status = "missed"
+                p_in = occ.get("punch_in_time")
+                p_out = occ.get("punch_out_time")
+                p_in_disp = p_in.strftime("%I:%M %p") if (p_in and hasattr(p_in, "strftime")) else (str(p_in) if p_in else None)
+                p_out_disp = p_out.strftime("%I:%M %p") if (p_out and hasattr(p_out, "strftime")) else (str(p_out) if p_out else None)
 
-            # Check Face verification
-            face_ok = bool(r.punch_in_face_verified)
-            if face_ok:
-                face_verified_count += 1
+                occ_status = occ.get("status", "scheduled")
+                duration_mins = occ.get("worked_minutes", 0)
 
-            # Check GPS logs for that day
-            day_locs = loc_log_by_date.get(r.lecture_date, [])
-            gps_pass = any(x.result == models.VerificationResult.PASS for x in day_locs) if day_locs else True
-            if gps_pass:
-                gps_verified_count += 1
+                if occ_status == "completed":
+                    completed_count += 1
+                    attended_dates.add(d_date)
+                    total_taught_minutes += duration_mins
+                elif occ_status == "in_progress":
+                    in_progress_count += 1
+                    attended_dates.add(d_date)
+                    total_taught_minutes += duration_mins
+                elif occ_status == "missed":
+                    missed_count += 1
+                elif occ_status in ("upcoming", "scheduled"):
+                    upcoming_count += 1
 
-            lectures_list.append({
-                "record_id": r.id,
-                "schedule_id": r.weekly_lecture_id or r.additional_lecture_request_id,
-                "source_type": "weekly" if r.weekly_lecture_id else "additional",
-                "date": r.lecture_date.isoformat(),
-                "subject": subj,
-                "course_name": course,
-                "room": room,
-                "scheduled_start": sch_st,
-                "scheduled_end": sch_et,
-                "punch_in_time": r.punch_in_time.strftime("%I:%M %p") if r.punch_in_time else None,
-                "punch_out_time": r.punch_out_time.strftime("%I:%M %p") if r.punch_out_time else None,
-                "duration_minutes": duration_mins,
-                "status": item_status,
-                "face_verified": face_ok,
-                "gps_verified": gps_pass,
-            })
+                # Check Late In (punched in > 5 min after scheduled start)
+                if p_in and s_t and hasattr(p_in, "time"):
+                    starts_at_dt = datetime.combine(d_date, s_t)
+                    if p_in > starts_at_dt + timedelta(minutes=5):
+                        late_in_count += 1
 
-        # 5. Query Campus Day Records from DB
+                # Check Missing Punchout
+                if occ.get("punch_out_window_closed") or (p_in and not p_out and occ_status == "missed"):
+                    missing_punchout_count += 1
+
+                # Biometric & GPS verification check
+                if p_in:
+                    punch_count += 1
+                    if occ.get("face_verified"):
+                        face_verified_count += 1
+                    if occ.get("gps_verified"):
+                        gps_verified_count += 1
+
+                all_lectures.append({
+                    "record_id": occ.get("record_id", 0),
+                    "schedule_id": occ["schedule_id"],
+                    "source_type": occ["source_type"],
+                    "date": d_date.isoformat() if hasattr(d_date, "isoformat") else str(d_date),
+                    "subject": occ["subject"],
+                    "course_name": occ.get("course_name") or "Department Course",
+                    "room": occ.get("room") or "Classroom",
+                    "scheduled_start": st_disp,
+                    "scheduled_end": et_disp,
+                    "punch_in_time": p_in_disp,
+                    "punch_out_time": p_out_disp,
+                    "duration_minutes": duration_mins,
+                    "scheduled_minutes": sch_mins,
+                    "status": occ_status,
+                    "face_verified": bool(occ.get("face_verified", False)),
+                    "gps_verified": bool(occ.get("gps_verified", False)),
+                    "can_punch_in": bool(occ.get("can_punch_in", False)),
+                    "can_punch_out": bool(occ.get("can_punch_out", False)),
+                })
+
+        # Query Holidays from DB
+        holidays = db.query(models.Holiday).filter(
+            models.Holiday.college_id == user.college_id,
+            models.Holiday.date >= start_date,
+            models.Holiday.date <= end_date,
+        ).all()
+        holiday_count = len(holidays)
+
+        # Count Sundays (Week Offs)
+        sundays_count = 0
+        curr = start_date
+        while curr <= end_date:
+            if curr.weekday() == 6:  # Sunday
+                sundays_count += 1
+            curr += timedelta(days=1)
+
+        # Additional Lectures count
+        additional_lectures = db.query(models.AdditionalLectureRequest).filter(
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.lecture_date >= start_date,
+            models.AdditionalLectureRequest.lecture_date <= end_date,
+            models.AdditionalLectureRequest.status == "approved",
+        ).all()
+        additional_count = len(additional_lectures)
+
+        total_scheduled_hours = round(total_scheduled_minutes / 60.0, 1)
+        total_taught_hours = round(total_taught_minutes / 60.0, 1)
+        remaining_hours = max(0.0, round(total_scheduled_hours - total_taught_hours, 1))
+
+        bio_pct = round((face_verified_count / punch_count * 100), 1) if punch_count > 0 else 100.0
+        gps_pct = round((gps_verified_count / punch_count * 100), 1) if punch_count > 0 else 100.0
+
+        # Sort all_lectures by date asc, scheduled_start asc
+        all_lectures.sort(key=lambda x: (x["date"], x["scheduled_start"]), reverse=False)
+
+        metrics = {
+            "total_scheduled_hours": total_scheduled_hours,
+            "total_scheduled_time": f"{int(total_scheduled_minutes // 60)} hr {int(total_scheduled_minutes % 60)} min",
+            "total_taught_hours": total_taught_hours,
+            "remaining_hours": remaining_hours,
+            "teaching_days": len(teaching_dates),
+            "conducted_days": len(attended_dates),
+            "approved_leaves": 0,
+            "additional_sessions": additional_count,
+            "scheduled_lectures": scheduled_count,
+            "completed_lectures": completed_count,
+            "upcoming_lectures": upcoming_count,
+            "missed_lectures": missed_count,
+            "late_in": late_in_count,
+            "missing_punchout": missing_punchout_count,
+            "biometric_compliance_pct": bio_pct,
+            "geofence_compliance_pct": gps_pct,
+            "holidays": holiday_count,
+            "week_offs": sundays_count,
+        }
+
+        # 3. Query Campus Day Records from DB
         campus_records = db.query(models.AttendanceRecord).filter(
             models.AttendanceRecord.college_id == user.college_id,
             models.AttendanceRecord.user_id == user.id,
@@ -4987,32 +5066,29 @@ def create_app() -> FastAPI:
             for cr in campus_records
         ]
 
-        # 6. Policy & Campus Location from DB
+        # 4. Policy & Campus Location from DB
         policy = _active_policy(db, user.college_id)
         campus_loc = db.query(models.CollegeLocation).filter(
             models.CollegeLocation.college_id == user.college_id,
             models.CollegeLocation.is_active == True,
         ).first()
 
-        taught_hours = round(total_taught_seconds / 3600.0, 1)
-        est_earnings = round(conducted_count * rate_per_lecture, 2)
-        total_slots = len(lectures_list)
-        bio_pct = round((face_verified_count / total_slots * 100), 1) if total_slots > 0 else 100.0
-        gps_pct = round((gps_verified_count / total_slots * 100), 1) if total_slots > 0 else 100.0
+        est_earnings = round(completed_count * rate_per_lecture, 2)
 
         return {
             "month": cur_month,
             "year": cur_year,
+            "metrics": metrics,
             "kpis": {
-                "total_lectures_conducted": conducted_count,
-                "total_hours_taught": taught_hours,
+                "total_lectures_conducted": completed_count,
+                "total_hours_taught": total_taught_hours,
                 "biometric_compliance_pct": bio_pct,
                 "geofence_compliance_pct": gps_pct,
                 "rate_per_lecture": rate_per_lecture,
                 "rate_per_hour": rate_per_hour,
                 "estimated_earnings": est_earnings,
             },
-            "lectures": lectures_list,
+            "lectures": all_lectures,
             "campus_days": campus_days,
             "policy": {
                 "require_face_for_punch_in": getattr(policy, "require_face_for_punch_in", True),
@@ -5138,11 +5214,34 @@ def create_app() -> FastAPI:
         calendar = _lecture_calendar_payload(db, user, start_date, end_date, _attendance_now())
         return [
             {
-                "date": day["date"],
+                "date": day["date"].isoformat() if hasattr(day["date"], "isoformat") else str(day["date"]),
                 "status": day["status"],
                 "scheduled_lectures": day["scheduled_lectures"],
                 "attended_lectures": day["attended_lectures"],
                 "missed_lectures": day["missed_lectures"],
+                "lectures": [
+                    {
+                        "record_id": occ.get("record_id", 0),
+                        "schedule_id": occ["schedule_id"],
+                        "source_type": occ["source_type"],
+                        "date": occ["lecture_date"].isoformat() if hasattr(occ["lecture_date"], "isoformat") else str(occ["lecture_date"]),
+                        "subject": occ["subject"],
+                        "course_name": occ.get("course_name") or "Department Course",
+                        "room": occ.get("room") or "Classroom",
+                        "scheduled_start": occ["start_time"],
+                        "scheduled_end": occ["end_time"],
+                        "punch_in_time": occ["punch_in_time"].strftime("%I:%M %p") if (occ.get("punch_in_time") and hasattr(occ["punch_in_time"], "strftime")) else None,
+                        "punch_out_time": occ["punch_out_time"].strftime("%I:%M %p") if (occ.get("punch_out_time") and hasattr(occ["punch_out_time"], "strftime")) else None,
+                        "duration_minutes": occ.get("worked_minutes", 0),
+                        "scheduled_minutes": occ.get("scheduled_minutes", 60),
+                        "status": occ["status"],
+                        "face_verified": occ.get("face_verified", False),
+                        "gps_verified": occ.get("gps_verified", False),
+                        "can_punch_in": occ.get("can_punch_in", False),
+                        "can_punch_out": occ.get("can_punch_out", False),
+                    }
+                    for occ in day.get("lectures", [])
+                ],
             }
             for day in calendar
         ]
@@ -9215,6 +9314,325 @@ def create_app() -> FastAPI:
             iter([output.getvalue()]),
             media_type="text/csv",
             headers={"Content-Disposition": f'attachment; filename="honorarium-{p_start}-to-{p_end}.csv"'},
+        )
+
+    # --- ATTENDANCE & PAYROLL AUDIT REPORT ENDPOINTS ---
+    class AuditApprovalRequest(BaseModel):
+        record_ids: list[int] = []
+        action: str = "approve"  # approve or reject
+        rejection_reason: str | None = None
+        faculty_id: int | None = None
+        approve_all: bool = False
+        date_from: date | None = None
+        date_to: date | None = None
+
+    @app.get("/admin/reports/attendance-audit")
+    def get_admin_attendance_audit(
+        date_from: date | None = None,
+        date_to: date | None = None,
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        approval_status: str | None = "all",
+        search: str | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        import calendar
+        _ensure_default_payment_rate(db, admin.college_id)
+        now_dt = _attendance_now()
+        dt_start = date_from or date(now_dt.year, now_dt.month, 1)
+        last_d = calendar.monthrange(now_dt.year, now_dt.month)[1]
+        dt_end = date_to or date(now_dt.year, now_dt.month, last_d)
+
+        all_rates = db.query(models.FacultyPaymentRate).filter(
+            models.FacultyPaymentRate.college_id == admin.college_id
+        ).all()
+        fac_rate_map = {r.faculty_id: r for r in all_rates if r.faculty_id}
+        default_rate = next((r for r in all_rates if r.faculty_id is None), None)
+        base_lecture_rate = default_rate.rate_per_lecture if default_rate else 1500.0
+        base_hour_rate = default_rate.rate_per_hour if default_rate else 1000.0
+
+        fac_q = db.query(models.User).filter(
+            models.User.college_id == admin.college_id,
+            models.User.is_active.is_(True),
+            models.User.role.in_([models.UserRole.FACULTY, models.UserRole.STAFF, models.UserRole.HOD]),
+        )
+        if admin.role == models.UserRole.HOD and admin.department_id:
+            fac_q = fac_q.filter(models.User.department_id == admin.department_id)
+        elif department_id:
+            fac_q = fac_q.filter(models.User.department_id == department_id)
+        if faculty_id:
+            fac_q = fac_q.filter(models.User.id == faculty_id)
+
+        faculty_list = fac_q.order_by(models.User.full_name.asc()).all()
+
+        all_sessions = []
+        faculty_summaries = []
+
+        tot_sessions = 0
+        tot_verified = 0
+        tot_pending = 0
+        tot_rejected = 0
+        tot_absent = 0
+        tot_hours = 0.0
+        tot_payable = 0.0
+
+        for fac in faculty_list:
+            cal = _lecture_calendar_payload(db, fac, dt_start, dt_end, now_dt)
+            fac_rate = fac_rate_map.get(fac.id)
+            lec_rate = fac_rate.rate_per_lecture if fac_rate else base_lecture_rate
+            hr_rate = fac_rate.rate_per_hour if fac_rate else base_hour_rate
+
+            fac_tot_sess = 0
+            fac_ver_sess = 0
+            fac_pen_sess = 0
+            fac_hours = 0.0
+            fac_pay = 0.0
+
+            for day in cal:
+                for occ in day.get("lectures", []):
+                    rec_id = occ.get("record_id", 0)
+                    is_conducted = bool(occ.get("punch_in_time"))
+                    occ_status = occ.get("status", "scheduled")
+                    app_status = occ.get("approval_status", "verified" if is_conducted else "pending")
+                    if not is_conducted and occ_status == "missed":
+                        app_status = "rejected"
+                    elif is_conducted and not occ.get("approval_status"):
+                        app_status = "verified"
+
+                    worked_min = occ.get("worked_minutes", 0)
+                    w_hours = round(worked_min / 60.0, 2)
+                    if is_conducted and app_status == "verified":
+                        s_pay = lec_rate
+                    else:
+                        s_pay = 0.0
+
+                    p_in = occ.get("punch_in_time")
+                    p_out = occ.get("punch_out_time")
+                    p_in_str = p_in.strftime("%I:%M %p") if (p_in and hasattr(p_in, "strftime")) else (str(p_in) if p_in else None)
+                    p_out_str = p_out.strftime("%I:%M %p") if (p_out and hasattr(p_out, "strftime")) else (str(p_out) if p_out else None)
+
+                    lec_date_val = occ.get("lecture_date")
+                    lec_date_str = lec_date_val.isoformat() if hasattr(lec_date_val, "isoformat") else str(lec_date_val)
+                    try:
+                        d_name = datetime.strptime(lec_date_str, "%Y-%m-%d").strftime("%A")
+                    except Exception:
+                        d_name = "Class Day"
+
+                    session_item = {
+                        "record_id": rec_id,
+                        "schedule_id": occ.get("schedule_id", 0),
+                        "source_type": occ.get("source_type", "weekly"),
+                        "date": lec_date_str,
+                        "day_name": d_name,
+                        "faculty_id": fac.id,
+                        "faculty_name": fac.full_name,
+                        "employee_id": fac.employee_id,
+                        "department_name": fac.department.name if fac.department else "General Academic",
+                        "subject": occ.get("subject") or "Department Lecture",
+                        "course_name": occ.get("course_name") or "Degree Course",
+                        "room": occ.get("room") or "Classroom",
+                        "scheduled_start": occ.get("start_time"),
+                        "scheduled_end": occ.get("end_time"),
+                        "scheduled_slot": f"{occ.get('start_time')} - {occ.get('end_time')}",
+                        "punch_in_time": p_in_str,
+                        "punch_out_time": p_out_str,
+                        "worked_minutes": worked_min,
+                        "worked_hours": w_hours,
+                        "rate_per_lecture": lec_rate,
+                        "rate_per_hour": hr_rate,
+                        "session_payable": s_pay,
+                        "session_status": occ_status,
+                        "approval_status": app_status,
+                        "face_verified": bool(occ.get("face_verified")),
+                        "gps_verified": bool(occ.get("gps_verified")),
+                        "rejection_reason": occ.get("rejection_reason"),
+                        "approved_at": occ.get("approved_at"),
+                    }
+
+                    if search:
+                        sterm = search.lower()
+                        match = (
+                            sterm in fac.full_name.lower()
+                            or sterm in fac.employee_id.lower()
+                            or sterm in (occ.get("subject") or "").lower()
+                            or sterm in (occ.get("room") or "").lower()
+                            or sterm in (fac.department.name.lower() if fac.department else "")
+                        )
+                        if not match:
+                            continue
+
+                    if approval_status and approval_status != "all":
+                        if session_item["approval_status"] != approval_status:
+                            continue
+
+                    all_sessions.append(session_item)
+
+                    tot_sessions += 1
+                    fac_tot_sess += 1
+                    if is_conducted and app_status == "verified":
+                        tot_verified += 1
+                        fac_ver_sess += 1
+                        tot_hours += w_hours
+                        fac_hours += w_hours
+                        tot_payable += s_pay
+                        fac_pay += s_pay
+                    elif is_conducted and app_status == "pending":
+                        tot_pending += 1
+                        fac_pen_sess += 1
+                        tot_hours += w_hours
+                        fac_hours += w_hours
+                    elif app_status == "rejected":
+                        tot_rejected += 1
+                    elif occ_status == "missed":
+                        tot_absent += 1
+
+            if fac_tot_sess > 0:
+                faculty_summaries.append({
+                    "faculty_id": fac.id,
+                    "faculty_name": fac.full_name,
+                    "employee_id": fac.employee_id,
+                    "department_name": fac.department.name if fac.department else "General Academic",
+                    "total_sessions": fac_tot_sess,
+                    "verified_sessions": fac_ver_sess,
+                    "pending_sessions": fac_pen_sess,
+                    "total_hours": round(fac_hours, 2),
+                    "rate_per_lecture": lec_rate,
+                    "total_payable": fac_pay,
+                })
+
+        all_sessions.sort(key=lambda s: (s["date"], s["scheduled_start"]), reverse=True)
+
+        return {
+            "period": {"date_from": dt_start.isoformat(), "date_to": dt_end.isoformat()},
+            "kpis": {
+                "total_sessions": tot_sessions,
+                "verified_sessions": tot_verified,
+                "pending_sessions": tot_pending,
+                "rejected_sessions": tot_rejected,
+                "absent_sessions": tot_absent,
+                "total_hours_delivered": round(tot_hours, 2),
+                "total_payable_amount": round(tot_payable, 2),
+            },
+            "sessions": all_sessions,
+            "faculty_summaries": faculty_summaries,
+        }
+
+    @app.post("/admin/reports/attendance-audit/approve")
+    def approve_audit_sessions(
+        req: AuditApprovalRequest,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        now_dt = _utcnow()
+        new_status = "verified" if req.action == "approve" else "rejected"
+        updated_count = 0
+
+        if req.record_ids:
+            records = db.query(models.LectureAttendanceRecord).filter(
+                models.LectureAttendanceRecord.id.in_(req.record_ids),
+                models.LectureAttendanceRecord.college_id == admin.college_id,
+            ).all()
+            for r in records:
+                r.approval_status = new_status
+                r.rejection_reason = req.rejection_reason if new_status == "rejected" else None
+                r.approved_by_id = admin.id
+                r.approved_at = now_dt
+                updated_count += 1
+        elif req.approve_all and req.faculty_id:
+            query = db.query(models.LectureAttendanceRecord).filter(
+                models.LectureAttendanceRecord.college_id == admin.college_id,
+                models.LectureAttendanceRecord.user_id == req.faculty_id,
+            )
+            if req.date_from:
+                query = query.filter(models.LectureAttendanceRecord.lecture_date >= req.date_from)
+            if req.date_to:
+                query = query.filter(models.LectureAttendanceRecord.lecture_date <= req.date_to)
+            records = query.all()
+            for r in records:
+                r.approval_status = new_status
+                r.approved_by_id = admin.id
+                r.approved_at = now_dt
+                updated_count += 1
+
+        db.commit()
+        return {"status": "success", "updated_count": updated_count, "action": new_status}
+
+    @app.get("/admin/reports/attendance-audit/export-csv")
+    def export_attendance_audit_csv(
+        date_from: date | None = None,
+        date_to: date | None = None,
+        department_id: int | None = None,
+        faculty_id: int | None = None,
+        approval_status: str | None = "all",
+        search: str | None = None,
+        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
+        db: Session = Depends(get_db),
+    ):
+        data = get_admin_attendance_audit(
+            date_from=date_from,
+            date_to=date_to,
+            department_id=department_id,
+            faculty_id=faculty_id,
+            approval_status=approval_status,
+            search=search,
+            admin=admin,
+            db=db,
+        )
+
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "Date",
+            "Day",
+            "Faculty Name",
+            "Employee ID",
+            "Department",
+            "Subject",
+            "Course",
+            "Room",
+            "Scheduled Slot",
+            "Punch In",
+            "Punch Out",
+            "Worked Minutes",
+            "Worked Hours",
+            "Rate / Lecture (INR)",
+            "Payable Amount (INR)",
+            "Biometric Verified",
+            "GPS Verified",
+            "Session Status",
+            "Approval Status",
+        ])
+
+        for s in data["sessions"]:
+            writer.writerow([
+                s["date"],
+                s["day_name"],
+                s["faculty_name"],
+                s["employee_id"],
+                s["department_name"],
+                s["subject"],
+                s["course_name"],
+                s["room"],
+                s["scheduled_slot"],
+                s["punch_in_time"] or "—",
+                s["punch_out_time"] or "—",
+                s["worked_minutes"],
+                s["worked_hours"],
+                s["rate_per_lecture"],
+                s["session_payable"],
+                "Yes" if s["face_verified"] else "No",
+                "Yes" if s["gps_verified"] else "No",
+                s["session_status"].upper(),
+                s["approval_status"].upper(),
+            ])
+
+        p_start = data["period"]["date_from"]
+        p_end = data["period"]["date_to"]
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="attendance-audit-payroll-{p_start}-to-{p_end}.csv"'},
         )
 
     # =========================================================================

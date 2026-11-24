@@ -649,6 +649,10 @@ class LectureAttendanceRecord(Base):
     punch_out_time = Column(DateTime)
     punch_in_face_verified = Column(Boolean, default=False, nullable=False)
     punch_out_face_verified = Column(Boolean, default=False, nullable=False)
+    approval_status = Column(String(20), default="verified", nullable=True)
+    rejection_reason = Column(Text, nullable=True)
+    approved_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

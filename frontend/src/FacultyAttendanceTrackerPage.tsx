@@ -4,30 +4,20 @@ import {
   AlertTriangle,
   Calendar,
   CalendarDays,
-  Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Clock,
-  Clock3,
   Coffee,
   DoorOpen,
   Fingerprint,
-  Home,
   Hourglass,
   LogOut,
   MapPin,
   RefreshCw,
-  Timer,
-  X,
 } from 'lucide-react'
 import { api, errorMessage } from './api'
-import { CaptureDialog, getLocation, type User } from './App'
-
-interface Challenge {
-  challenge_token: string
-  instruction: string
-}
+import { type User } from './App'
 
 interface LectureAttendanceItem {
   record_id: number
@@ -42,31 +32,48 @@ interface LectureAttendanceItem {
   punch_in_time: string | null
   punch_out_time: string | null
   duration_minutes: number
-  status: 'completed' | 'in_progress' | 'missed' | 'scheduled'
+  scheduled_minutes?: number
+  status: 'completed' | 'in_progress' | 'missed' | 'scheduled' | 'upcoming'
   face_verified: boolean
   gps_verified: boolean
+  can_punch_in?: boolean
+  can_punch_out?: boolean
 }
 
 interface CalendarDayItem {
   date: string
-  status: 'attended' | 'missed' | 'scheduled' | 'no_lecture'
+  status: 'attended' | 'missed' | 'Absent' | 'no_lecture'
   scheduled_lectures: number
   attended_lectures: number
   missed_lectures: number
+  lectures?: LectureAttendanceItem[]
 }
 
-interface LeaveApplication {
-  id: number
-  start_date: string
-  end_date: string
-  total_days: number
-  reason: string
-  status: string
+interface TrackerMetrics {
+  total_scheduled_hours: number
+  total_scheduled_time: string
+  total_taught_hours: number
+  remaining_hours: number
+  teaching_days: number
+  conducted_days: number
+  approved_leaves: number
+  additional_sessions: number
+  scheduled_lectures: number
+  completed_lectures: number
+  upcoming_lectures: number
+  missed_lectures: number
+  late_in: number
+  missing_punchout: number
+  biometric_compliance_pct: number
+  geofence_compliance_pct: number
+  holidays: number
+  week_offs: number
 }
 
 interface TrackerData {
   month: number
   year: number
+  metrics?: TrackerMetrics
   kpis: {
     total_lectures_conducted: number
     total_hours_taught: number
@@ -88,24 +95,12 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
   const [selectedMonth, setSelectedMonth] = useState<number>(todayObj.getMonth() + 1)
   const [selectedYear, setSelectedYear] = useState<number>(todayObj.getFullYear())
   const [selectedDate, setSelectedDate] = useState<string>(todayStr)
-  const [showDetails, setShowDetails] = useState<boolean>(false)
 
   const [trackerData, setTrackerData] = useState<TrackerData | null>(null)
   const [calendarDaysMap, setCalendarDaysMap] = useState<Record<string, CalendarDayItem>>({})
-  const [leaveApps, setLeaveApps] = useState<LeaveApplication[]>([])
 
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<string | null>(null)
-  const [pageMessage, setPageMessage] = useState<string | null>(null)
-
-  // Biometric Punch Modal State
-  const [activePunch, setActivePunch] = useState<{
-    action: 'punch_in' | 'punch_out'
-    lecture: LectureAttendanceItem
-  } | null>(null)
-  const [challenge, setChallenge] = useState<Challenge | null>(null)
-  const [punchBusy, setPunchBusy] = useState<boolean>(false)
-  const [punchError, setPunchError] = useState<string | null>(null)
 
   const loadData = async (month: number, year: number) => {
     setLoading(true)
@@ -115,14 +110,13 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
       const lastDay = new Date(year, month, 0).getDate()
       const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`
 
-      const [trackerRes, calRes, leaveRes] = await Promise.all([
+      const [trackerRes, calRes] = await Promise.all([
         api.get<TrackerData>('/faculty/attendance/tracker', {
           params: { month, year },
         }),
         api.get<CalendarDayItem[]>('/lecture-attendance/calendar', {
           params: { start_date: startDate, end_date: endDate },
         }),
-        api.get<LeaveApplication[]>('/leave/applications'),
       ])
 
       setTrackerData(trackerRes.data)
@@ -132,7 +126,6 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
         calMap[item.date] = item
       }
       setCalendarDaysMap(calMap)
-      setLeaveApps(leaveRes.data)
     } catch (err) {
       setError(errorMessage(err))
     } finally {
@@ -163,69 +156,6 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
     }
   }
 
-  // Biometric face + GPS Punch Action
-  const initiateLecturePunch = async (lecture: LectureAttendanceItem, action: 'punch_in' | 'punch_out') => {
-    setPunchError(null)
-    setPageMessage(null)
-    setActivePunch({ action, lecture })
-
-    try {
-      const challengeRes = await api.post<Challenge>('/biometrics/challenge', {
-        action: `lecture_${action}`,
-      })
-      setChallenge(challengeRes.data)
-    } catch (err) {
-      setPunchError(errorMessage(err))
-      setActivePunch(null)
-    }
-  }
-
-  const handleCaptureComplete = async (frames: string[]) => {
-    if (!activePunch || !challenge) return
-
-    setPunchBusy(true)
-    setPunchError(null)
-
-    try {
-      let locationData = { latitude: 23.0225, longitude: 72.5714, accuracy: 15.0 }
-      try {
-        const loc = await getLocation()
-        locationData = {
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-          accuracy: loc.accuracy,
-        }
-      } catch (locErr) {
-        console.warn('GPS prompt fallback used', locErr)
-      }
-
-      await api.post(`/lecture-attendance/${activePunch.action}`, {
-        source_type: activePunch.lecture.source_type,
-        schedule_id: activePunch.lecture.schedule_id,
-        lecture_date: activePunch.lecture.date,
-        challenge_token: challenge.challenge_token,
-        frames,
-        face_image_base64: frames[frames.length - 1],
-        latitude: locationData.latitude,
-        longitude: locationData.longitude,
-        accuracy: locationData.accuracy,
-        idempotency_key: crypto.randomUUID(),
-      })
-
-      setPageMessage(
-        `✓ Biometric ${activePunch.action === 'punch_in' ? 'Punch-In' : 'Punch-Out'} recorded successfully for ${activePunch.lecture.subject}!`
-      )
-      setActivePunch(null)
-      setChallenge(null)
-      loadData(selectedMonth, selectedYear)
-      setTimeout(() => setPageMessage(null), 5000)
-    } catch (err) {
-      setPunchError(errorMessage(err))
-    } finally {
-      setPunchBusy(false)
-    }
-  }
-
   // Calculations for summary & breakdown metrics
   const lectures = trackerData?.lectures || []
   const kpis = trackerData?.kpis
@@ -233,97 +163,52 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
   const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate()
   const firstDayOfWeek = new Date(selectedYear, selectedMonth - 1, 1).getDay() // 0 = Sunday
 
-  // Month date range formatted
-  const monthStartStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-01`
-  const monthEndStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`
-
-  // Approved leaves in this month
-  const monthLeaves = leaveApps.filter(
-    (l) => l.status === 'approved' && l.start_date <= monthEndStr && l.end_date >= monthStartStr
-  )
-
-  // Leave dates set
-  const leaveDatesSet = useMemo(() => {
-    const s = new Set<string>()
-    for (const app of monthLeaves) {
-      const cur = new Date(app.start_date)
-      const end = new Date(app.end_date)
-      while (cur <= end) {
-        s.add(cur.toISOString().split('T')[0])
-        cur.setDate(cur.getDate() + 1)
-      }
-    }
-    return s
-  }, [monthLeaves])
-
-  // Count metrics matching the mobile screenshots
+  // Metrics derived from backend API response
   const metrics = useMemo(() => {
-    let sundaysCount = 0
-    let workingDaysCount = 0
-    let attendedDaysCount = 0
-    let punchinMissCount = 0
-    let punchoutMissCount = 0
-    let lateInCount = 0
-    let pendingReviewCount = 0
-
-    const attendedDates = new Set<string>()
-
-    for (let d = 1; d <= daysInMonth; d++) {
-      const dateStr = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(d).padStart(2, '0')}`
-      const dayOfWeek = new Date(selectedYear, selectedMonth - 1, d).getDay()
-      if (dayOfWeek === 0) {
-        sundaysCount++
-      } else {
-        workingDaysCount++
-      }
-
-      const calItem = calendarDaysMap[dateStr]
-      if (calItem && calItem.status === 'attended') {
-        attendedDates.add(dateStr)
+    if (trackerData?.metrics) {
+      const m = trackerData.metrics
+      return {
+        totalScheduledTime: m.total_scheduled_time || `${m.total_scheduled_hours} hr 0 min`,
+        totalTaughtHours: `${m.total_taught_hours} hr`,
+        remainingHours: `${m.remaining_hours} hr`,
+        teachingDays: m.teaching_days,
+        conductedDays: m.conducted_days,
+        approvedLeaves: m.approved_leaves,
+        additionalSessions: m.additional_sessions,
+        scheduledLectures: m.scheduled_lectures,
+        completedLectures: m.completed_lectures,
+        upcomingLectures: m.upcoming_lectures,
+        missedLectures: m.missed_lectures,
+        lateIn: m.late_in,
+        missingPunchout: m.missing_punchout,
+        biometricCompliancePct: m.biometric_compliance_pct,
+        geofenceCompliancePct: m.geofence_compliance_pct,
+        holidays: m.holidays,
+        weekOffs: m.week_offs,
       }
     }
 
-    for (const lec of lectures) {
-      if (lec.punch_in_time) {
-        attendedDates.add(lec.date)
-      }
-      if (lec.status === 'missed') {
-        punchinMissCount++
-      }
-      if (lec.punch_in_time && !lec.punch_out_time && lec.status === 'in_progress') {
-        // missing punchout
-        punchoutMissCount++
-      }
-      if (lec.duration_minutes > 0 && lec.status === 'completed') {
-        // completed
-      }
-    }
-
-    attendedDaysCount = attendedDates.size
     const taughtHours = kpis?.total_hours_taught || 0
-    const remainingHours = Math.max(0, 102 - taughtHours)
-
     return {
-      totalTime: '144 hr 30 min',
-      totalWorkingHours: `${taughtHours} hr`,
-      workingDays: workingDaysCount,
-      presentDays: attendedDaysCount,
-      leaves: monthLeaves.length,
-      extraDays: 0,
-      holiday: 4, // Institutional holidays / festival days
-      weekOff: sundaysCount, // Weekend / Sunday offs
-      rejectedAttend: 0,
-      pendingAttend: pendingReviewCount,
-      lateIn: lateInCount,
-      earlyOut: 0,
-      punchinMiss: punchinMissCount,
-      punchoutMiss: punchoutMissCount,
-      halfDays: 0,
-      workFromHome: 0,
-      extraWorkingHours: '0 hr',
-      remainingWorkingHours: `${remainingHours} hr`,
+      totalScheduledTime: '0 hr 0 min',
+      totalTaughtHours: `${taughtHours} hr`,
+      remainingHours: '0 hr',
+      teachingDays: 0,
+      conductedDays: kpis?.total_lectures_conducted || 0,
+      approvedLeaves: 0,
+      additionalSessions: 0,
+      scheduledLectures: lectures.length,
+      completedLectures: kpis?.total_lectures_conducted || 0,
+      upcomingLectures: 0,
+      missedLectures: 0,
+      lateIn: 0,
+      missingPunchout: 0,
+      biometricCompliancePct: kpis?.biometric_compliance_pct || 100,
+      geofenceCompliancePct: kpis?.geofence_compliance_pct || 100,
+      holidays: 0,
+      weekOffs: 0,
     }
-  }, [daysInMonth, selectedYear, selectedMonth, calendarDaysMap, lectures, monthLeaves, kpis])
+  }, [trackerData, kpis, lectures])
 
   // Calendar cells array
   const calendarCells = useMemo(() => {
@@ -332,7 +217,7 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
       dateStr: string | null
       isToday: boolean
       isSunday: boolean
-      type: 'present' | 'leave' | 'holiday' | 'none'
+      type: 'present' | 'absent' | 'holiday' | 'none'
     }> = []
 
     // Leading blanks
@@ -347,15 +232,17 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
       const isSunday = dayOfWeek === 0
       const isToday = dateStr === todayStr
 
-      const isLeave = leaveDatesSet.has(dateStr)
       const calInfo = calendarDaysMap[dateStr]
-      const isAttended = calInfo?.status === 'attended'
+      const hasLectures = Boolean(calInfo && calInfo.scheduled_lectures > 0)
+      const isAttended = Boolean(calInfo?.status === 'attended' || (calInfo?.attended_lectures || 0) > 0)
+      const isMissed = Boolean(calInfo?.status === 'missed' || (calInfo && calInfo.missed_lectures > 0))
 
-      let dayType: 'present' | 'leave' | 'holiday' | 'none' = 'none'
-      if (isLeave) {
-        dayType = 'leave'
-      } else if (isAttended) {
+      // Change scheduled to absent with red colour
+      let dayType: 'present' | 'absent' | 'holiday' | 'none' = 'none'
+      if (isAttended) {
         dayType = 'present'
+      } else if (hasLectures || isMissed) {
+        dayType = 'absent'
       } else if (isSunday) {
         dayType = 'holiday'
       }
@@ -370,26 +257,21 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
     }
 
     return cells
-  }, [firstDayOfWeek, daysInMonth, selectedYear, selectedMonth, todayStr, leaveDatesSet, calendarDaysMap])
-
-  // Lectures for the selected date
-  const selectedDateLectures = useMemo(() => {
-    return lectures.filter((l) => l.date === selectedDate)
-  }, [lectures, selectedDate])
+  }, [firstDayOfWeek, daysInMonth, selectedYear, selectedMonth, todayStr, calendarDaysMap])
 
   return (
-    <div className="page-content attendance-tracker-page">
+    <div className="page-content attendance-tracker-page" style={{ width: '100%', maxWidth: '100%', margin: '0', padding: '24px 32px 36px', boxSizing: 'border-box' }}>
       {/* Top Header & Month/Year Selector */}
       <div className="page-heading flex items-center justify-between flex-wrap gap-4" style={{ marginBottom: '16px' }}>
         <div>
           <div className="eyebrow" style={{ color: '#64748b', fontSize: '11px', fontWeight: 700, letterSpacing: '0.5px' }}>
             FACULTY ATTENDANCE
           </div>
-          <h1 style={{ margin: '4px 0', fontSize: '24px', fontWeight: 800, color: '#162d50' }}>
+          <h1 style={{ margin: '2px 0', fontSize: '22px', fontWeight: 800, color: '#162d50' }}>
             Attendance Tracker
           </h1>
           <p className="muted" style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>
-            Faculty: <strong style={{ color: '#1e293b' }}>{user.full_name}</strong> ({user.employee_id}) · Monthly attendance ledger, lecture delivery records, and biometric timestamps
+            Faculty: <strong style={{ color: '#1e293b' }}>{user.full_name}</strong> ({user.employee_id}) · Monthly attendance ledger and biometric metrics
           </p>
         </div>
 
@@ -397,11 +279,12 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <select
             style={{
-              padding: '8px 14px',
+              padding: '7px 12px',
+              minWidth: '120px',
               borderRadius: '8px',
               border: '1px solid #cbd5e1',
               background: '#fff',
-              fontSize: '13px',
+              fontSize: '12px',
               fontWeight: 700,
               color: '#1e293b',
               cursor: 'pointer',
@@ -418,11 +301,12 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
 
           <select
             style={{
-              padding: '8px 14px',
+              padding: '7px 12px',
+              minWidth: '85px',
               borderRadius: '8px',
               border: '1px solid #cbd5e1',
               background: '#fff',
-              fontSize: '13px',
+              fontSize: '12px',
               fontWeight: 700,
               color: '#1e293b',
               cursor: 'pointer',
@@ -440,12 +324,12 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
           <button
             type="button"
             className="button button-secondary"
-            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px' }}
+            style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '7px 12px', fontSize: '12px' }}
             onClick={() => loadData(selectedMonth, selectedYear)}
             disabled={loading}
             title="Refresh records"
           >
-            <RefreshCw size={14} className={loading ? 'admin-spin' : ''} />
+            <RefreshCw size={13} className={loading ? 'admin-spin' : ''} />
             <span>Refresh</span>
           </button>
         </div>
@@ -453,279 +337,116 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
 
       {/* Global Alerts */}
       {error && (
-        <div className="banner banner-error mb-4" style={{ marginBottom: '14px' }}>
-          <AlertCircle size={18} />
-          <div>{error}</div>
+        <div className="banner banner-error mb-4" style={{ marginBottom: '14px', padding: '10px 14px' }}>
+          <AlertCircle size={16} />
+          <div style={{ fontSize: '12px' }}>{error}</div>
         </div>
       )}
 
-      {pageMessage && (
-        <div className="banner banner-success mb-4" style={{ marginBottom: '14px' }}>
-          <CheckCircle2 size={18} />
-          <div>{pageMessage}</div>
-        </div>
-      )}
+      {/* 2-Column Side-by-Side Layout (Never Up and Down) */}
+      <div
+        className="attendance-tracker-layout-grid"
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: '20px',
+          alignItems: 'start',
+          width: '100%',
+        }}
+      >
 
-      {/* 2-Column Responsive Layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '20px', alignItems: 'start' }}>
-
-        {/* LEFT COLUMN: Summary Circle Card + 12 Metric Cards */}
-        <div style={{ display: 'grid', gap: '16px' }}>
-
-          {/* Top Summary Card (Screenshot 1) */}
-          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '18px', boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 0.9fr) minmax(0, 1.3fr)', gap: '16px', alignItems: 'center' }}>
-              {/* Circular Widget */}
-              <div
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  aspectRatio: '1',
-                  maxWidth: '150px',
-                  margin: '0 auto',
-                  borderRadius: '50%',
-                  border: '8px solid #e0f2fe',
-                  textAlign: 'center',
-                  padding: '12px',
-                  background: '#f8fafc',
-                }}
-              >
-                <span style={{ fontSize: '10.5px', color: '#64748b', fontWeight: 600 }}>Total Time</span>
-                <strong style={{ fontSize: '15px', color: '#0f172a', fontWeight: 800, margin: '4px 0 2px' }}>
-                  {metrics.totalTime}
-                </strong>
-                <span style={{ fontSize: '9.5px', color: '#64748b' }}>Total Working Hours</span>
-                <span style={{ fontSize: '13px', color: '#0284c7', fontWeight: 800 }}>
-                  {metrics.totalWorkingHours}
-                </span>
-              </div>
-
-              {/* 4 Cards Grid */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
-                <div style={{ padding: '8px 10px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    <CalendarDays size={13} style={{ color: '#0284c7' }} />
-                    <strong style={{ fontSize: '16px', color: '#0f172a' }}>{metrics.workingDays}</strong>
-                  </div>
-                  <span style={{ fontSize: '10px', color: '#64748b', fontWeight: 600, display: 'block', marginTop: '3px' }}>
-                    Working Days
-                  </span>
-                </div>
-
-                <div style={{ padding: '8px 10px', borderRadius: '10px', border: '1px solid #bbf7d0', background: '#f0fdf4' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    <CheckCircle2 size={13} style={{ color: '#16a34a' }} />
-                    <strong style={{ fontSize: '16px', color: '#15803d' }}>{metrics.presentDays}</strong>
-                  </div>
-                  <span style={{ fontSize: '10px', color: '#166534', fontWeight: 600, display: 'block', marginTop: '3px' }}>
-                    Present Days
-                  </span>
-                </div>
-
-                <div style={{ padding: '8px 10px', borderRadius: '10px', border: '1px solid #fecaca', background: '#fef2f2' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    <Calendar size={13} style={{ color: '#dc2626' }} />
-                    <strong style={{ fontSize: '16px', color: '#b91c1c' }}>{metrics.leaves}</strong>
-                  </div>
-                  <span style={{ fontSize: '10px', color: '#991b1b', fontWeight: 600, display: 'block', marginTop: '3px' }}>
-                    Leaves
-                  </span>
-                </div>
-
-                <div style={{ padding: '8px 10px', borderRadius: '10px', border: '1px solid #e2e8f0', background: '#f8fafc' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
-                    <Clock3 size={13} style={{ color: '#64748b' }} />
-                    <strong style={{ fontSize: '16px', color: '#475569' }}>{metrics.extraDays}</strong>
-                  </div>
-                  <span style={{ fontSize: '10px', color: '#64748b', fontWeight: 600, display: 'block', marginTop: '3px' }}>
-                    Extra Days
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* View Details Toggle Button */}
-            <button
-              type="button"
-              className="button button-secondary"
-              style={{
-                width: '100%',
-                marginTop: '14px',
-                padding: '9px',
-                fontSize: '12px',
-                fontWeight: 700,
-                color: '#0284c7',
-                borderColor: '#0284c7',
-                borderRadius: '8px',
-              }}
-              onClick={() => setShowDetails((prev) => !prev)}
-            >
-              {showDetails ? 'Hide Details' : 'View Details'}
-            </button>
-          </div>
-
-          {/* 12 Metric Cards Grid (Screenshots 1 & 2) */}
+        {/* LEFT COLUMN: 12 Metric Cards */}
+        <div>
+          {/* 12 Visiting Faculty Metric Cards Grid */}
           <div className="mobile-tracker-grid">
-            {/* Card 1: Holiday */}
+            {/* Card 1: Scheduled Lectures */}
+            <div className="mobile-tracker-card" style={{ background: '#e0f2fe', color: '#0284c7' }}>
+              <strong>{metrics.scheduledLectures}</strong>
+              <span>Scheduled Lectures</span>
+              <Calendar size={15} className="card-icon" />
+            </div>
+
+            {/* Card 2: Completed Lectures */}
+            <div className="mobile-tracker-card" style={{ background: '#dcfce7', color: '#16a34a' }}>
+              <strong>{metrics.completedLectures}</strong>
+              <span>Completed Lectures</span>
+              <CheckCircle2 size={15} className="card-icon" />
+            </div>
+
+            {/* Card 3: Upcoming Lectures */}
             <div className="mobile-tracker-card" style={{ background: '#f3e8ff', color: '#7e22ce' }}>
-              <strong>{metrics.holiday}</strong>
-              <span>Holiday</span>
-              <Calendar size={18} className="card-icon" />
+              <strong>{metrics.upcomingLectures}</strong>
+              <span>Upcoming Lectures</span>
+              <Clock size={15} className="card-icon" />
             </div>
 
-            {/* Card 2: Week Off */}
-            <div className="mobile-tracker-card" style={{ background: '#f1f5f9', color: '#475569' }}>
-              <strong>{metrics.weekOff}</strong>
-              <span>Week Off</span>
-              <Coffee size={18} className="card-icon" />
-            </div>
-
-            {/* Card 3: Rejected Attend */}
+            {/* Card 4: Absent Lectures */}
             <div className="mobile-tracker-card" style={{ background: '#fee2e2', color: '#dc2626' }}>
-              <strong>{metrics.rejectedAttend}</strong>
-              <span>Rejected Attend</span>
-              <X size={18} className="card-icon" />
+              <strong>{metrics.missedLectures}</strong>
+              <span>Absent Lectures</span>
+              <AlertTriangle size={15} className="card-icon" />
             </div>
 
-            {/* Card 4: Pending Attend */}
-            <div className="mobile-tracker-card" style={{ background: '#ffedd5', color: '#ea580c' }}>
-              <strong>{metrics.pendingAttend}</strong>
-              <span>Pending Attend</span>
-              <AlertTriangle size={18} className="card-icon" />
-            </div>
-
-            {/* Card 5: Late In */}
+            {/* Card 5: Late Arrivals */}
             <div className="mobile-tracker-card" style={{ background: '#fef3c7', color: '#d97706' }}>
               <strong>{metrics.lateIn}</strong>
-              <span>Late In</span>
-              <Clock size={18} className="card-icon" />
+              <span>Late Arrivals</span>
+              <Clock size={15} className="card-icon" />
             </div>
 
-            {/* Card 6: Early Out */}
-            <div className="mobile-tracker-card" style={{ background: '#dcfce7', color: '#16a34a' }}>
-              <strong>{metrics.earlyOut}</strong>
-              <span>Early Out</span>
-              <DoorOpen size={18} className="card-icon" />
-            </div>
-
-            {/* Card 7: Punchin Miss */}
-            <div className="mobile-tracker-card" style={{ background: '#fef9c3', color: '#ca8a04' }}>
-              <strong>{metrics.punchinMiss}</strong>
-              <span>Punchin Miss</span>
-              <Fingerprint size={18} className="card-icon" />
-            </div>
-
-            {/* Card 8: Punchout Miss */}
-            <div className="mobile-tracker-card" style={{ background: '#fef9c3', color: '#ca8a04' }}>
-              <strong>{metrics.punchoutMiss}</strong>
-              <span>Punchout Miss</span>
-              <LogOut size={18} className="card-icon" />
-            </div>
-
-            {/* Card 9: Half Days */}
-            <div className="mobile-tracker-card" style={{ background: '#fce7f3', color: '#db2777' }}>
-              <strong>{metrics.halfDays}</strong>
-              <span>Half Days</span>
-              <Timer size={18} className="card-icon" />
-            </div>
-
-            {/* Card 10: Work From Home */}
-            <div className="mobile-tracker-card" style={{ background: '#e0f2fe', color: '#0284c7' }}>
-              <strong>{metrics.workFromHome}</strong>
-              <span>Work From Home</span>
-              <Home size={18} className="card-icon" />
-            </div>
-
-            {/* Card 11: Extra Working Hours */}
-            <div className="mobile-tracker-card" style={{ background: '#e0f2fe', color: '#0284c7' }}>
-              <strong>{metrics.extraWorkingHours}</strong>
-              <span>Extra Working Hours</span>
-              <Clock3 size={18} className="card-icon" />
-            </div>
-
-            {/* Card 12: Remaining Working Hours */}
+            {/* Card 6: Missing Punch-Out */}
             <div className="mobile-tracker-card" style={{ background: '#ffedd5', color: '#ea580c' }}>
-              <strong>{metrics.remainingWorkingHours}</strong>
-              <span>Remaining Working Hours</span>
-              <Hourglass size={18} className="card-icon" />
+              <strong>{metrics.missingPunchout}</strong>
+              <span>Missing Punch-Out</span>
+              <LogOut size={15} className="card-icon" />
+            </div>
+
+            {/* Card 7: Biometric Verified */}
+            <div className="mobile-tracker-card" style={{ background: '#d1fae5', color: '#059669' }}>
+              <strong>{metrics.biometricCompliancePct}%</strong>
+              <span>Biometric Verified</span>
+              <Fingerprint size={15} className="card-icon" />
+            </div>
+
+            {/* Card 8: Campus Geofence */}
+            <div className="mobile-tracker-card" style={{ background: '#e0f2fe', color: '#0284c7' }}>
+              <strong>{metrics.geofenceCompliancePct}%</strong>
+              <span>Campus Geofence</span>
+              <MapPin size={15} className="card-icon" />
+            </div>
+
+            {/* Card 9: Additional Sessions */}
+            <div className="mobile-tracker-card" style={{ background: '#e0e7ff', color: '#4338ca' }}>
+              <strong>{metrics.additionalSessions}</strong>
+              <span>Additional Sessions</span>
+              <DoorOpen size={15} className="card-icon" />
+            </div>
+
+            {/* Card 10: College Holidays */}
+            <div className="mobile-tracker-card" style={{ background: '#ede9fe', color: '#6d28d9' }}>
+              <strong>{metrics.holidays}</strong>
+              <span>College Holidays</span>
+              <Coffee size={15} className="card-icon" />
+            </div>
+
+            {/* Card 11: Weekly Offs */}
+            <div className="mobile-tracker-card" style={{ background: '#f1f5f9', color: '#475569' }}>
+              <strong>{metrics.weekOffs}</strong>
+              <span>Weekly Offs</span>
+              <CalendarDays size={15} className="card-icon" />
+            </div>
+
+            {/* Card 12: Remaining Hours */}
+            <div className="mobile-tracker-card" style={{ background: '#fef9c3', color: '#ca8a04' }}>
+              <strong>{metrics.remainingHours}</strong>
+              <span>Remaining Hours</span>
+              <Hourglass size={15} className="card-icon" />
             </div>
           </div>
-
-          {/* Details Drawer / Table (When 'View Details' is clicked) */}
-          {showDetails && (
-            <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '18px', boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-                <strong style={{ fontSize: '14px', color: '#0f172a' }}>
-                  Monthly Lecture Attendance Ledger ({lectures.length})
-                </strong>
-                <button
-                  type="button"
-                  style={{ background: 'transparent', border: 0, color: '#64748b', cursor: 'pointer' }}
-                  onClick={() => setShowDetails(false)}
-                >
-                  <X size={16} />
-                </button>
-              </div>
-
-              {lectures.length === 0 ? (
-                <div style={{ textAlign: 'center', padding: '30px', color: '#94a3b8', fontSize: '12px' }}>
-                  No attendance records found for {MONTH_NAMES[selectedMonth - 1]} {selectedYear}.
-                </div>
-              ) : (
-                <div className="table-scroll">
-                  <table className="faculty-timetable-table">
-                    <thead>
-                      <tr>
-                        <th>Date</th>
-                        <th>Subject</th>
-                        <th>Room</th>
-                        <th>Slot</th>
-                        <th>Punch In</th>
-                        <th>Punch Out</th>
-                        <th>Duration</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {lectures.map((l) => (
-                        <tr key={l.record_id}>
-                          <td style={{ fontWeight: 700 }}>{l.date}</td>
-                          <td>
-                            <strong>{l.subject}</strong>
-                            <div style={{ fontSize: '10px', color: '#64748b' }}>{l.course_name}</div>
-                          </td>
-                          <td>Room {l.room || '—'}</td>
-                          <td style={{ fontFamily: 'monospace', fontSize: '11px' }}>
-                            {l.scheduled_start && l.scheduled_end ? `${l.scheduled_start} - ${l.scheduled_end}` : '—'}
-                          </td>
-                          <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#16a34a' }}>
-                            {l.punch_in_time || '—'}
-                          </td>
-                          <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#2563eb' }}>
-                            {l.punch_out_time || '—'}
-                          </td>
-                          <td>{l.duration_minutes ? `${l.duration_minutes} min` : '—'}</td>
-                          <td>
-                            <span className={`lecture-status-badge status-${l.status}`}>
-                              {l.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
         </div>
 
-        {/* RIGHT COLUMN: Calendar Widget (Screenshot 3) + Selected Date Details */}
-        <div style={{ display: 'grid', gap: '16px' }}>
-
-          {/* Calendar Widget Card (Screenshot 3) */}
+        {/* RIGHT COLUMN: Calendar Widget Card */}
+        <div>
           <div className="mobile-calendar-container">
             {/* Header: < November 2026 > */}
             <div className="mobile-calendar-nav">
@@ -735,7 +456,7 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
                 onClick={handlePrevMonth}
                 title="Previous Month"
               >
-                <ChevronLeft size={18} />
+                <ChevronLeft size={16} />
               </button>
               <h3>{MONTH_NAMES[selectedMonth - 1]} {selectedYear}</h3>
               <button
@@ -744,7 +465,7 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
                 onClick={handleNextMonth}
                 title="Next Month"
               >
-                <ChevronRight size={18} />
+                <ChevronRight size={16} />
               </button>
             </div>
 
@@ -766,12 +487,12 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
                 let typeClass = ''
                 if (cell.isToday) {
                   typeClass = 'cell-today'
-                } else if (cell.type === 'leave') {
-                  typeClass = 'cell-leave'
-                } else if (cell.type === 'holiday') {
-                  typeClass = 'cell-holiday'
                 } else if (cell.type === 'present') {
                   typeClass = 'cell-present'
+                } else if (cell.type === 'absent') {
+                  typeClass = 'cell-absent'
+                } else if (cell.type === 'holiday') {
+                  typeClass = 'cell-holiday'
                 }
 
                 return (
@@ -789,15 +510,15 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
               })}
             </div>
 
-            {/* Legend: Present, Leave, Holiday, Today */}
+            {/* Legend: Conducted, Absent (Red), Holiday, Today */}
             <div className="mobile-calendar-legend">
               <div className="mobile-legend-pill">
                 <span className="mobile-legend-dot dot-present"></span>
-                <span>Present</span>
+                <span>Conducted</span>
               </div>
               <div className="mobile-legend-pill">
-                <span className="mobile-legend-dot dot-leave"></span>
-                <span>Leave</span>
+                <span className="mobile-legend-dot dot-absent"></span>
+                <span>Absent</span>
               </div>
               <div className="mobile-legend-pill">
                 <span className="mobile-legend-dot dot-holiday"></span>
@@ -809,156 +530,8 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
               </div>
             </div>
           </div>
-
-          {/* Selected Date Lectures & Attendance Punch Card */}
-          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '16px', padding: '18px', boxShadow: '0 2px 8px rgba(0,0,0,0.04)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div>
-                <strong style={{ fontSize: '14px', color: '#0f172a' }}>
-                  Sessions for {selectedDate}
-                </strong>
-                <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>
-                  {selectedDate === todayStr ? 'Today · Live Attendance Active' : 'Date Schedule & Attendance'}
-                </span>
-              </div>
-              <span
-                style={{
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  padding: '3px 8px',
-                  borderRadius: '6px',
-                  background: selectedDate === todayStr ? '#dbeafe' : '#f1f5f9',
-                  color: selectedDate === todayStr ? '#1d4ed8' : '#475569',
-                }}
-              >
-                {selectedDate === todayStr ? 'TODAY' : selectedDate}
-              </span>
-            </div>
-
-            {selectedDateLectures.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '24px 10px', color: '#94a3b8', fontSize: '12px' }}>
-                <Calendar size={28} style={{ color: '#cbd5e1', marginBottom: '6px' }} />
-                <div>No lecture sessions recorded or scheduled for this date.</div>
-              </div>
-            ) : (
-              <div style={{ display: 'grid', gap: '10px' }}>
-                {selectedDateLectures.map((lec) => (
-                  <div
-                    key={lec.record_id}
-                    style={{
-                      padding: '12px',
-                      borderRadius: '10px',
-                      border: '1px solid #e2e8f0',
-                      background: '#f8fafc',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                      <strong style={{ fontSize: '13px', color: '#1e293b' }}>{lec.subject}</strong>
-                      <span className={`lecture-status-badge status-${lec.status}`}>
-                        {lec.status}
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px', fontSize: '11px', color: '#64748b', marginBottom: '8px' }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Clock size={12} />
-                        {lec.scheduled_start && lec.scheduled_end ? `${lec.scheduled_start} - ${lec.scheduled_end}` : 'Scheduled slot'}
-                      </span>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <MapPin size={12} />
-                        Room {lec.room || '—'}
-                      </span>
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '11px', paddingTop: '6px', borderTop: '1px solid #e2e8f0' }}>
-                      <div>
-                        Punch In: <strong style={{ color: '#16a34a' }}>{lec.punch_in_time || '—'}</strong> • Out: <strong style={{ color: '#2563eb' }}>{lec.punch_out_time || '—'}</strong>
-                      </div>
-
-                      {/* Biometric Punch Button if applicable */}
-                      {lec.status === 'scheduled' || !lec.punch_in_time ? (
-                        <button
-                          type="button"
-                          className="button button-primary button-sm"
-                          style={{ fontSize: '11px', padding: '4px 10px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                          onClick={() => initiateLecturePunch(lec, 'punch_in')}
-                        >
-                          <Fingerprint size={12} /> Punch In
-                        </button>
-                      ) : !lec.punch_out_time ? (
-                        <button
-                          type="button"
-                          className="button button-secondary button-sm"
-                          style={{ fontSize: '11px', padding: '4px 10px', display: 'flex', alignItems: 'center', gap: '4px', borderColor: '#f59e0b', color: '#b45309' }}
-                          onClick={() => initiateLecturePunch(lec, 'punch_out')}
-                        >
-                          <Fingerprint size={12} /> Punch Out
-                        </button>
-                      ) : (
-                        <span style={{ color: '#16a34a', fontWeight: 700, fontSize: '11px', display: 'flex', alignItems: 'center', gap: '3px' }}>
-                          <Check size={12} /> Complete
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
       </div>
-
-      {/* Biometric Face Capture Dialog */}
-      {activePunch && challenge && (
-        <CaptureDialog
-          title={`Faculty Attendance Verification · ${activePunch.action === 'punch_in' ? 'Punch In' : 'Punch Out'}`}
-          instruction={challenge.instruction || 'Look directly into camera to verify identity'}
-          captureLabel={activePunch.action === 'punch_in' ? 'Confirm Punch In' : 'Confirm Punch Out'}
-          consent={true}
-          onConsentChange={() => { }}
-          busy={punchBusy}
-          onCancel={() => {
-            setActivePunch(null)
-            setChallenge(null)
-            setPunchError(null)
-          }}
-          onCapture={handleCaptureComplete}
-        />
-      )}
-
-      {/* Verification Error Floating Toast */}
-      {punchError && (
-        <div
-          style={{
-            position: 'fixed',
-            bottom: '24px',
-            right: '24px',
-            maxWidth: '380px',
-            padding: '14px',
-            borderRadius: '10px',
-            background: '#dc2626',
-            color: '#fff',
-            boxShadow: '0 10px 25px rgba(0,0,0,0.2)',
-            display: 'flex',
-            alignItems: 'flex-start',
-            gap: '10px',
-            zIndex: 90,
-          }}
-        >
-          <AlertCircle size={18} style={{ flexShrink: 0, marginTop: '2px' }} />
-          <div style={{ fontSize: '12px' }}>
-            <strong>Verification Error</strong>
-            <div style={{ marginTop: '2px', opacity: 0.9 }}>{punchError}</div>
-          </div>
-          <button
-            type="button"
-            style={{ marginLeft: 'auto', background: 'transparent', border: 0, color: '#fff', cursor: 'pointer' }}
-            onClick={() => setPunchError(null)}
-          >
-            <X size={15} />
-          </button>
-        </div>
-      )}
     </div>
   )
 }
