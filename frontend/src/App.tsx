@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from 'react'
 import {
   Activity, ArrowDownToLine, Bell, Building2, CalendarDays, Camera, Check, ChevronRight,
-  BookOpen, CalendarPlus, CircleHelp, Clock3, FileEdit, Fingerprint, FolderOpen, MapPin,
-  KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserCheck, UserRound, Users, X,
+  BookOpen, CalendarPlus, CircleHelp, Clock3, Fingerprint, FolderOpen, MapPin,
+  KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserRound, Users, X,
 } from 'lucide-react'
 import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens } from './api'
 import { useClock, useReloadable } from './hooks'
@@ -144,16 +144,14 @@ type AdditionalLectureRequest = {
 type NavItem = { key: string; label: string; icon: typeof LayoutDashboard }
 
 const staffNavigation: NavItem[] = [
-  { key: 'Dasboard ', label: 'Dashboard', icon: LayoutDashboard },
-  { key: 'attendance_tracker', label: 'Attendance tracker', icon: Clock3 },
-  { key: 'timetable', label: 'Timetable', icon: CalendarDays },
-  { key: 'additional_lectures', label: 'Additional lectures', icon: CalendarPlus },
-  { key: 'availability', label: 'Teaching availability', icon: UserCheck },
-  { key: 'attendance_corrections', label: 'Attendance corrections', icon: FileEdit },
+  { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { key: 'timetable', label: 'My Timetable', icon: CalendarDays },
+  { key: 'attendance_tracker', label: 'Attendance Tracker', icon: Clock3 },
+  { key: 'attendance_reports', label: 'Attendance Reports', icon: Activity },
+  { key: 'leave', label: 'Leave Management', icon: CalendarPlus },
   { key: 'notifications', label: 'Notifications', icon: Bell },
-  { key: 'profile', label: 'Profile & Settings', icon: Settings },
-  { key: 'enrollment', label: 'Face verification', icon: Fingerprint },
-  { key: 'directory', label: 'Faculty directory', icon: Users },
+  { key: 'profile', label: 'My Profile', icon: UserRound },
+  { key: 'settings', label: 'Settings', icon: Settings },
 ]
 const managerNavigation: NavItem[] = [
   { key: 'Dasboard ', label: 'Dashboard', icon: LayoutDashboard },
@@ -476,33 +474,33 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
             <input type="email" autoComplete="username" value={email} onChange={(event) => setEmail(event.target.value)} required disabled={isVerifying} placeholder="you@college.edu" />
           </label>}
           {mode === 'register' ? <label>Password
-              <input type="password" autoComplete="new-password" minLength={12} value={password} onChange={(event) => setPassword(event.target.value)} required />
-              <span className="table-subtext">Use at least 12 characters.</span>
-            </label> : isVerifying ? <label>Six-digit verification code
-              <span className="otp-inputs" role="group" aria-label="Six-digit verification code">
-                {verificationDigits.map((digit, index) => (
-                  <input
-                    key={index}
-                    ref={(element) => { verificationInputs.current[index] = element }}
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete={index === 0 ? 'one-time-code' : 'off'}
-                    pattern="[0-9]"
-                    maxLength={6}
-                    aria-label={`Digit ${index + 1}`}
-                    value={digit}
-                    onChange={(event) => updateVerificationDigit(index, event.target.value)}
-                    onPaste={(event) => pasteVerificationCode(event, index)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Backspace' && !digit && index > 0) verificationInputs.current[index - 1]?.focus()
-                      if (event.key === 'ArrowLeft' && index > 0) verificationInputs.current[index - 1]?.focus()
-                      if (event.key === 'ArrowRight' && index < 5) verificationInputs.current[index + 1]?.focus()
-                    }}
-                    required
-                  />
-                ))}
-              </span>
-            </label> : null}
+            <input type="password" autoComplete="new-password" minLength={12} value={password} onChange={(event) => setPassword(event.target.value)} required />
+            <span className="table-subtext">Use at least 12 characters.</span>
+          </label> : isVerifying ? <label>Six-digit verification code
+            <span className="otp-inputs" role="group" aria-label="Six-digit verification code">
+              {verificationDigits.map((digit, index) => (
+                <input
+                  key={index}
+                  ref={(element) => { verificationInputs.current[index] = element }}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete={index === 0 ? 'one-time-code' : 'off'}
+                  pattern="[0-9]"
+                  maxLength={6}
+                  aria-label={`Digit ${index + 1}`}
+                  value={digit}
+                  onChange={(event) => updateVerificationDigit(index, event.target.value)}
+                  onPaste={(event) => pasteVerificationCode(event, index)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Backspace' && !digit && index > 0) verificationInputs.current[index - 1]?.focus()
+                    if (event.key === 'ArrowLeft' && index > 0) verificationInputs.current[index - 1]?.focus()
+                    if (event.key === 'ArrowRight' && index < 5) verificationInputs.current[index + 1]?.focus()
+                  }}
+                  required
+                />
+              ))}
+            </span>
+          </label> : null}
           {error && <div className="notice notice-error">{error}</div>}
           <button className="button button-primary button-wide" disabled={busy || (mode === 'register' && (collegesLoading || colleges.length === 0))}>
             {busy ? (mode === 'login' ? (portal === 'admin' ? 'Signing in…' : 'Sending code…') : isVerifying ? 'Verifying…' : 'Registering…') : (mode === 'login' ? (portal === 'admin' ? 'Sign in' : 'Send sign-in code') : isVerifyingLogin ? 'Verify and sign in' : isVerifyingEmail ? 'Verify email' : 'Create account')}
@@ -529,7 +527,7 @@ function MetricCard({ label, value, note, icon: Icon }: { label: string; value: 
   return <article className="metric-card"><div className="metric-icon"><Icon size={18} /></div><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-note">{note}</div></article>
 }
 
-function Dasboard ({ user, navigate }: { user: User; navigate: (page: string) => void }) {
+function Dasboard({ user, navigate }: { user: User; navigate: (page: string) => void }) {
   const manager = isManager(user.role)
   const [loadError, setLoadError] = useState('')
   const [loading, setLoading] = useState(true)
@@ -1215,69 +1213,69 @@ export function AttendanceTrackerPage({ user }: { user: User }) {
 
       <div className="attendance-tracker-dashboard-grid">
         <div className="attendance-tracker-main-column">
-      <section className="panel attendance-tracker-summary">
-        <div className="attendance-total-time">
-          <span>Total working time</span>
-          <strong>{data ? duration(workedMinutes) : '—'}</strong>
-          <small>{new Date(selectedYear, selectedMonth, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })}</small>
-        </div>
-        <div className="attendance-tracker-kpis">
-          <article><span className="tracker-kpi-icon tracker-icon-blue"><CalendarDays size={18} /></span><strong>{displayCount(punchedInDays)}</strong><small>Punched-in days</small></article>
-          <article><span className="tracker-kpi-icon tracker-icon-green"><Check size={18} /></span><strong>{displayCount(approvedLeaves)}</strong><small>Approved leave requests</small></article>
-          <article><span className="tracker-kpi-icon tracker-icon-orange"><Clock3 size={18} /></span><strong>{displayCount(lateArrivals)}</strong><small>Late arrivals</small></article>
-          <article><span className="tracker-kpi-icon tracker-icon-gray"><LogOut size={18} /></span><strong>{displayCount(earlyDepartures)}</strong><small>Early departures</small></article>
-        </div>
-        <button className="button button-secondary attendance-tracker-details-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails((shown) => !shown)}>
-          {showDetails ? 'Hide Details' : 'View Details'}
-        </button>
-      </section>
+          <section className="panel attendance-tracker-summary">
+            <div className="attendance-total-time">
+              <span>Total working time</span>
+              <strong>{data ? duration(workedMinutes) : '—'}</strong>
+              <small>{new Date(selectedYear, selectedMonth, 1).toLocaleString(undefined, { month: 'long', year: 'numeric' })}</small>
+            </div>
+            <div className="attendance-tracker-kpis">
+              <article><span className="tracker-kpi-icon tracker-icon-blue"><CalendarDays size={18} /></span><strong>{displayCount(punchedInDays)}</strong><small>Punched-in days</small></article>
+              <article><span className="tracker-kpi-icon tracker-icon-green"><Check size={18} /></span><strong>{displayCount(approvedLeaves)}</strong><small>Approved leave requests</small></article>
+              <article><span className="tracker-kpi-icon tracker-icon-orange"><Clock3 size={18} /></span><strong>{displayCount(lateArrivals)}</strong><small>Late arrivals</small></article>
+              <article><span className="tracker-kpi-icon tracker-icon-gray"><LogOut size={18} /></span><strong>{displayCount(earlyDepartures)}</strong><small>Early departures</small></article>
+            </div>
+            <button className="button button-secondary attendance-tracker-details-toggle" type="button" aria-expanded={showDetails} onClick={() => setShowDetails((shown) => !shown)}>
+              {showDetails ? 'Hide Details' : 'View Details'}
+            </button>
+          </section>
 
-      <div className="attendance-tracker-metrics">
-        <article className="tracker-metric-card tracker-metric-purple"><strong>{displayCount(halfDays)}</strong><span>Half days</span><Clock3 size={21} /></article>
-        <article className="tracker-metric-card tracker-metric-blue"><strong>{data ? duration(overtimeMinutes) : '—'}</strong><span>Extra working hours</span><Activity size={21} /></article>
-        <article className="tracker-metric-card tracker-metric-orange"><strong>{displayCount(pendingLeaves)}</strong><span>Pending leave requests</span><CalendarDays size={21} /></article>
-        <article className="tracker-metric-card tracker-metric-red"><strong>{displayCount(rejectedLeaves)}</strong><span>Rejected leave requests</span><X size={21} /></article>
-      </div>
+          <div className="attendance-tracker-metrics">
+            <article className="tracker-metric-card tracker-metric-purple"><strong>{displayCount(halfDays)}</strong><span>Half days</span><Clock3 size={21} /></article>
+            <article className="tracker-metric-card tracker-metric-blue"><strong>{data ? duration(overtimeMinutes) : '—'}</strong><span>Extra working hours</span><Activity size={21} /></article>
+            <article className="tracker-metric-card tracker-metric-orange"><strong>{displayCount(pendingLeaves)}</strong><span>Pending leave requests</span><CalendarDays size={21} /></article>
+            <article className="tracker-metric-card tracker-metric-red"><strong>{displayCount(rejectedLeaves)}</strong><span>Rejected leave requests</span><X size={21} /></article>
+          </div>
 
-      {showDetails && <section className="panel attendance-tracker-details">
-        <div className="panel-heading"><div><h3>Attendance details</h3><p className="muted">{attendance.length} attendance record{attendance.length === 1 ? '' : 's'} this month</p></div></div>
-        {attendance.length ? <div className="table-scroll"><table><thead><tr><th>Date</th><th>Status</th><th>Punch in</th><th>Punch out</th><th>Net worked</th><th>Notes</th></tr></thead><tbody>
-          {[...attendance].sort((left, right) => right.date.localeCompare(left.date)).map((item) => <tr key={item.id}>
-            <td>{formatDay(item.date)}</td><td><StatusBadge status={item.status} /></td><td>{dateTime(item.punch_in_time)}</td><td>{dateTime(item.punch_out_time)}</td><td>{duration(item.net_working_minutes)}</td>
-            <td>{[item.is_late ? `Late by ${item.late_by_minutes} min` : '', item.is_early_departure ? 'Early departure' : ''].filter(Boolean).join(' · ') || '—'}</td>
-          </tr>)}
-        </tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No attendance records for this month</strong><span>Your workday punches will appear here.</span></div>}
-      </section>}
+          {showDetails && <section className="panel attendance-tracker-details">
+            <div className="panel-heading"><div><h3>Attendance details</h3><p className="muted">{attendance.length} attendance record{attendance.length === 1 ? '' : 's'} this month</p></div></div>
+            {attendance.length ? <div className="table-scroll"><table><thead><tr><th>Date</th><th>Status</th><th>Punch in</th><th>Punch out</th><th>Net worked</th><th>Notes</th></tr></thead><tbody>
+              {[...attendance].sort((left, right) => right.date.localeCompare(left.date)).map((item) => <tr key={item.id}>
+                <td>{formatDay(item.date)}</td><td><StatusBadge status={item.status} /></td><td>{dateTime(item.punch_in_time)}</td><td>{dateTime(item.punch_out_time)}</td><td>{duration(item.net_working_minutes)}</td>
+                <td>{[item.is_late ? `Late by ${item.late_by_minutes} min` : '', item.is_early_departure ? 'Early departure' : ''].filter(Boolean).join(' · ') || '—'}</td>
+              </tr>)}
+            </tbody></table></div> : <div className="empty-state"><Clock3 size={22} /><strong>No attendance records for this month</strong><span>Your workday punches will appear here.</span></div>}
+          </section>}
 
         </div>
-      <section className="panel attendance-tracker-calendar-panel">
-        <div className="attendance-calendar-heading"><h3>{currentMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h3></div>
-        {loading && !data ? <Loading /> : <div className="attendance-calendar-grid" role="grid" aria-label="Monthly attendance calendar">
-          {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((day) => <span className="attendance-calendar-weekday" role="columnheader" key={day}>{day}</span>)}
-          {calendarDays.map((day, index) => {
-            if (day === null) return <span className="attendance-calendar-empty" role="gridcell" key={`empty-${index}`} />
-            const dateKey = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-            const lectureDay = lectureCalendarByDate.get(dateKey)
-            const isToday = dateKey === today
-            const classes = [
-              'attendance-calendar-day',
-              `attendance-calendar-${lectureDay?.status || 'no_lecture'}`,
-              isToday ? 'attendance-calendar-today' : '',
-            ].filter(Boolean).join(' ')
-            const statusText = !lectureDay || lectureDay.status === 'no_lecture'
-              ? 'No lecture scheduled'
-              : `${lectureDay.attended_lectures} of ${lectureDay.scheduled_lectures} lectures attended${lectureDay.missed_lectures ? `, ${lectureDay.missed_lectures} missed` : ''}`
-            return <span className={classes} role="gridcell" aria-label={`${dateKey}${statusText ? `, ${statusText}` : ''}`} title={statusText || dateKey} key={dateKey}>{day}</span>
-          })}
-        </div>}
-        <div className="attendance-calendar-legend">
-          <span><i className="legend-attended" />Lectures attended</span>
-          <span><i className="legend-missed" />Missed lecture</span>
-          <span><i className="legend-scheduled" />Scheduled</span>
-          <span><i className="legend-no-lecture" />No lecture</span>
-          <span><i className="legend-today" />Today</span>
-        </div>
-      </section>
+        <section className="panel attendance-tracker-calendar-panel">
+          <div className="attendance-calendar-heading"><h3>{currentMonth.toLocaleString(undefined, { month: 'long', year: 'numeric' })}</h3></div>
+          {loading && !data ? <Loading /> : <div className="attendance-calendar-grid" role="grid" aria-label="Monthly attendance calendar">
+            {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map((day) => <span className="attendance-calendar-weekday" role="columnheader" key={day}>{day}</span>)}
+            {calendarDays.map((day, index) => {
+              if (day === null) return <span className="attendance-calendar-empty" role="gridcell" key={`empty-${index}`} />
+              const dateKey = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+              const lectureDay = lectureCalendarByDate.get(dateKey)
+              const isToday = dateKey === today
+              const classes = [
+                'attendance-calendar-day',
+                `attendance-calendar-${lectureDay?.status || 'no_lecture'}`,
+                isToday ? 'attendance-calendar-today' : '',
+              ].filter(Boolean).join(' ')
+              const statusText = !lectureDay || lectureDay.status === 'no_lecture'
+                ? 'No lecture scheduled'
+                : `${lectureDay.attended_lectures} of ${lectureDay.scheduled_lectures} lectures attended${lectureDay.missed_lectures ? `, ${lectureDay.missed_lectures} missed` : ''}`
+              return <span className={classes} role="gridcell" aria-label={`${dateKey}${statusText ? `, ${statusText}` : ''}`} title={statusText || dateKey} key={dateKey}>{day}</span>
+            })}
+          </div>}
+          <div className="attendance-calendar-legend">
+            <span><i className="legend-attended" />Lectures attended</span>
+            <span><i className="legend-missed" />Missed lecture</span>
+            <span><i className="legend-scheduled" />Scheduled</span>
+            <span><i className="legend-no-lecture" />No lecture</span>
+            <span><i className="legend-today" />Today</span>
+          </div>
+        </section>
       </div>
     </div>
   )
@@ -2076,7 +2074,7 @@ function EmptyState({ icon: Icon, title, detail }: { icon: typeof Bell; title: s
 function App() {
   const requestedPortal = portalFromPath(window.location.pathname)
   const [user, setUser] = useState<User | null>(null)
-  const [page, setPage] = useState('Dasboard ')
+  const [page, setPage] = useState('dashboard')
   const [pageMessage, setPageMessage] = useState('')
   const [checking, setChecking] = useState(Boolean(getAccessToken()))
   const [mobileMenu, setMobileMenu] = useState(false)
@@ -2110,11 +2108,11 @@ function App() {
 
   function acceptUser(nextUser: User) {
     setUser(nextUser)
-    setPage(nextUser.face_enrollment_status === 'not_enrolled' ? 'enrollment' : 'Dasboard ')
+    setPage(nextUser.face_enrollment_status === 'not_enrolled' ? 'enrollment' : 'dashboard')
   }
 
   function completeEnrollment() {
-    setPage('Dasboard ')
+    setPage('dashboard')
     setPageMessage('Your face has been successfully registered! It is pending administrator approval for face-verified attendance.')
   }
 
@@ -2220,21 +2218,45 @@ function App() {
       </aside>
       {mobileMenu && <button className="mobile-backdrop" aria-label="Close navigation" onClick={() => setMobileMenu(false)} />}
       <main className="main-area">
-        <header className="topbar"><button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation"><Menu size={20} /></button><div className="breadcrumbs"><span>AttendEase</span><ChevronRight size={14} /><strong>{navigation.find((item) => item.key === page)?.label || 'Dasboard '}</strong></div><div className="topbar-user"><div className="topbar-avatar">{user.full_name.slice(0, 1)}</div><div className="topbar-user-copy"><strong>{user.full_name}</strong><span>{user.employee_id}</span></div><button className="icon-button" title="Sign out" onClick={() => void signOut()}><LogOut size={17} /></button></div></header>
+        <header className="topbar">
+          <button className="icon-button mobile-menu-button" onClick={() => setMobileMenu(true)} aria-label="Open navigation">
+            <Menu size={20} />
+          </button>
+          <div className="breadcrumbs">
+            <span>AttendEase</span>
+            <ChevronRight size={14} />
+            <strong>{navigation.find((item) => item.key === page)?.label || (page === 'Dasboard ' || page === 'dashboard' ? 'Dashboard' : page)}</strong>
+          </div>
+          <div className="topbar-user">
+            <button className="icon-button" title="Notifications" onClick={() => selectPage('notifications')}>
+              <Bell size={18} />
+            </button>
+            <div className="topbar-avatar">{user.full_name.slice(0, 1)}</div>
+            <div className="topbar-user-copy">
+              <strong>{user.full_name}</strong>
+              <span>{user.employee_id}</span>
+            </div>
+            <button className="icon-button" title="Sign out" onClick={() => void signOut()}>
+              <LogOut size={17} />
+            </button>
+          </div>
+        </header>
         {logoutError && <div className="logout-warning">{logoutError}</div>}
         {pageMessage && <div className="notice notice-success"><Check size={17} />{pageMessage}</div>}
-        {page === 'Dasboard ' && (isManager(user.role) ? <Dasboard  user={user} navigate={selectPage} /> : <FacultyDashboardPage user={user} navigate={selectPage} />)}
+        {(page === 'Dasboard ' || page === 'dashboard') && (isManager(user.role) ? <Dasboard user={user} navigate={selectPage} /> : <FacultyDashboardPage user={user} navigate={selectPage} />)}
         {page === 'timetable' && <TimetablePage user={user} />}
-        {page === 'attendance' && <FacultyAttendanceTrackerPage user={user} />}
-        {page === 'attendance_tracker' && <FacultyAttendanceTrackerPage user={user} />}
+        {(page === 'attendance' || page === 'attendance_tracker' || page === 'mark_attendance') && <FacultyAttendanceTrackerPage user={user} />}
+        {page === 'attendance_history' && <FacultyAttendanceTrackerPage user={user} />}
+        {(page === 'reports' || page === 'attendance_reports') && <ReportsPage user={user} />}
+        {page === 'leave' && <LeavePage user={user} />}
         {page === 'additional_lectures' && <AdditionalLecturesPage user={user} />}
         {page === 'availability' && <FacultyAvailabilityPage user={user} />}
         {page === 'attendance_corrections' && <FacultyCorrectionsPage user={user} />}
         {page === 'enrollment' && <FacultyBiometricsPage user={user} onUserUpdate={setUser} onComplete={completeEnrollment} />}
         {page === 'directory' && <DirectoryPage />}
         {page === 'notifications' && <NotificationsPage />}
-        {page === 'profile' && <ProfilePage user={user} />}
-        {!navigation.some((item) => item.key === page) && <FacultyDashboardPage user={user} navigate={selectPage} />}
+        {(page === 'profile' || page === 'settings') && <ProfilePage user={user} />}
+        {!navigation.some((item) => item.key === page) && (isManager(user.role) ? <Dasboard user={user} navigate={selectPage} /> : <FacultyDashboardPage user={user} navigate={selectPage} />)}
         <footer className="app-footer"><span>AttendEase · College attendance</span><span><ShieldCheck size={14} /> Secure session</span></footer>
       </main>
     </div>

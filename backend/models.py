@@ -40,13 +40,6 @@ class AttendanceStatus(str, enum.Enum):
     HALF_DAY = "half_day"
 
 
-class LeaveStatus(str, enum.Enum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    CANCELLED = "cancelled"
-
-
 class BiometricStatus(str, enum.Enum):
     NOT_ENROLLED = "not_enrolled"
     PENDING_APPROVAL = "pending_approval"
@@ -194,11 +187,6 @@ class User(Base):
         "AttendanceRecord",
         back_populates="user",
         foreign_keys="AttendanceRecord.user_id",
-    )
-    leave_applications = relationship(
-        "LeaveApplication",
-        back_populates="user",
-        foreign_keys="LeaveApplication.user_id",
     )
     sessions = relationship("UserSession", back_populates="user")
     notifications = relationship("Notification", back_populates="user")
@@ -515,63 +503,6 @@ class AttendancePolicy(Base):
 
 
 # ===========================================================================
-# LEAVE MANAGEMENT
-# ===========================================================================
-
-class LeaveType(Base):
-    __tablename__ = "leave_types"
-
-    id = Column(Integer, primary_key=True, index=True)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
-    name = Column(String(100), nullable=False)
-    code = Column(String(20), nullable=False)
-    max_days_per_year = Column(Integer, default=12)
-    is_paid = Column(Boolean, default=True)
-    requires_document = Column(Boolean, default=False)
-    is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=utcnow)
-
-
-class LeaveBalance(Base):
-    __tablename__ = "leave_balances"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    leave_type_id = Column(Integer, ForeignKey("leave_types.id", ondelete="CASCADE"), nullable=False)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
-    year = Column(Integer, nullable=False)
-    total_days = Column(Integer, default=0)
-    used_days = Column(Integer, default=0)
-    remaining_days = Column(Integer, default=0)
-    created_at = Column(DateTime, default=utcnow)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
-
-
-class LeaveApplication(Base):
-    __tablename__ = "leave_applications"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
-    leave_type_id = Column(Integer, ForeignKey("leave_types.id"), nullable=False)
-    start_date = Column(Date, nullable=False)
-    end_date = Column(Date, nullable=False)
-    total_days = Column(Integer)
-    reason = Column(Text, nullable=False)
-    document_url = Column(String(500))
-    status = Column(Enum(LeaveStatus), default=LeaveStatus.PENDING)
-    reviewed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    reviewed_at = Column(DateTime)
-    review_remarks = Column(Text)
-    created_at = Column(DateTime, default=utcnow)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
-
-    user = relationship("User", back_populates="leave_applications", foreign_keys=[user_id])
-    leave_type = relationship("LeaveType", foreign_keys=[leave_type_id])
-    reviewer = relationship("User", foreign_keys=[reviewed_by])
-
-
-# ===========================================================================
 # HOLIDAYS
 # ===========================================================================
 
@@ -803,53 +734,6 @@ class SecurityEvent(Base):
 
     __table_args__ = (
         Index("idx_sec_college_created", "college_id", "created_at"),
-    )
-
-
-class Project(Base):
-    __tablename__ = "projects"
-
-    id = Column(Integer, primary_key=True)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
-    department_id = Column(Integer, ForeignKey("departments.id", ondelete="SET NULL"))
-    owner_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
-    name = Column(String(200), nullable=False)
-    description = Column(Text)
-    status = Column(String(20), nullable=False, default="active")
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-    department = relationship("Department")
-    owner = relationship("User", foreign_keys=[owner_id])
-
-    __table_args__ = (
-        Index("idx_projects_college_department", "college_id", "department_id"),
-    )
-
-
-class Task(Base):
-    __tablename__ = "tasks"
-
-    id = Column(Integer, primary_key=True)
-    college_id = Column(Integer, ForeignKey("colleges.id", ondelete="CASCADE"), nullable=False)
-    project_id = Column(Integer, ForeignKey("projects.id", ondelete="SET NULL"))
-    assignee_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    assigned_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"))
-    title = Column(String(255), nullable=False)
-    description = Column(Text)
-    due_date = Column(Date)
-    status = Column(String(20), nullable=False, default="todo")
-    progress = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime, default=utcnow, nullable=False)
-    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
-
-    project = relationship("Project", foreign_keys=[project_id])
-    assignee = relationship("User", foreign_keys=[assignee_id])
-    assigned_by = relationship("User", foreign_keys=[assigned_by_id])
-
-    __table_args__ = (
-        Index("idx_tasks_college_assignee", "college_id", "assignee_id"),
-        Index("idx_tasks_project", "project_id"),
     )
 
 

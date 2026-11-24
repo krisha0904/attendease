@@ -1417,116 +1417,7 @@ def _additional_lecture_payload(item: models.AdditionalLectureRequest) -> dict:
     }
 
 
-def _ensure_default_leave_types(db: Session, college_id: int):
-    defaults = [
-        {"name": "Casual Leave", "code": "CL", "max_days_per_year": 12, "is_paid": True, "requires_document": False},
-        {"name": "Medical / Sick Leave", "code": "ML", "max_days_per_year": 10, "is_paid": True, "requires_document": True},
-        {"name": "Academic Duty / Conference Leave", "code": "DL", "max_days_per_year": 15, "is_paid": True, "requires_document": False},
-        {"name": "Emergency Leave", "code": "EL", "max_days_per_year": 5, "is_paid": True, "requires_document": False},
-        {"name": "Compensatory Off", "code": "CO", "max_days_per_year": 8, "is_paid": True, "requires_document": False},
-        {"name": "Leave Without Pay", "code": "LWP", "max_days_per_year": 60, "is_paid": False, "requires_document": False},
-    ]
-    for d in defaults:
-        exists = (
-            db.query(models.LeaveType)
-            .filter(
-                models.LeaveType.college_id == college_id,
-                func.upper(models.LeaveType.code) == d["code"],
-            )
-            .first()
-        )
-        if not exists:
-            db.add(
-                models.LeaveType(
-                    college_id=college_id,
-                    name=d["name"],
-                    code=d["code"],
-                    max_days_per_year=d["max_days_per_year"],
-                    is_paid=d["is_paid"],
-                    requires_document=d["requires_document"],
-                    is_active=True,
-                )
-            )
-    db.commit()
 
-
-def _get_affected_lectures_for_leave(db: Session, application: models.LeaveApplication) -> list[dict]:
-    lectures = (
-        db.query(models.WeeklyLecture)
-        .filter(
-            models.WeeklyLecture.user_id == application.user_id,
-            models.WeeklyLecture.college_id == application.college_id,
-            models.WeeklyLecture.is_active.is_(True),
-        )
-        .all()
-    )
-    if not lectures:
-        return []
-
-    lectures_by_day: dict[int, list[models.WeeklyLecture]] = {}
-    for lec in lectures:
-        lectures_by_day.setdefault(lec.day_of_week, []).append(lec)
-
-    affected = []
-    delta = (application.end_date - application.start_date).days
-    for i in range(delta + 1):
-        cur_date = application.start_date + timedelta(days=i)
-        day_w = cur_date.weekday()
-        day_lectures = lectures_by_day.get(day_w, [])
-        for l in day_lectures:
-            st = l.start_time.strftime("%H:%M") if hasattr(l.start_time, "strftime") else str(l.start_time)[:5]
-            et = l.end_time.strftime("%H:%M") if hasattr(l.end_time, "strftime") else str(l.end_time)[:5]
-            day_name = WEEKDAY_NAMES[l.day_of_week] if 0 <= l.day_of_week < len(WEEKDAY_NAMES) else f"Day {l.day_of_week}"
-            sub_fac = l.substitute_faculty
-            affected.append({
-                "lecture_id": l.id,
-                "date": cur_date.isoformat(),
-                "day_name": day_name,
-                "subject": l.subject,
-                "course_name": l.course_name,
-                "room": l.room,
-                "start_time": st,
-                "end_time": et,
-                "lecture_type": l.lecture_type or "Theory",
-                "substitute_faculty_id": l.substitute_faculty_id,
-                "substitute_faculty_name": sub_fac.full_name if sub_fac else None,
-            })
-    return affected
-
-
-def _leave_application_payload(app: models.LeaveApplication, affected_count: int | None = None) -> dict:
-    emp = app.user
-    lt = app.leave_type
-    rev = app.reviewer
-    dept = emp.department if emp else None
-
-    stat = app.status.value if hasattr(app.status, "value") else str(app.status)
-
-    return {
-        "id": app.id,
-        "faculty_id": app.user_id,
-        "faculty_name": emp.full_name if emp else "Unknown",
-        "employee_id": emp.employee_id if emp else "",
-        "faculty_email": emp.email if emp else "",
-        "department_id": emp.department_id if emp else None,
-        "department_name": dept.name if dept else None,
-        "leave_type_id": app.leave_type_id,
-        "leave_type_name": lt.name if lt else "General Leave",
-        "leave_type_code": lt.code if lt else "GL",
-        "is_paid": lt.is_paid if lt else True,
-        "start_date": app.start_date.isoformat() if hasattr(app.start_date, "isoformat") else str(app.start_date),
-        "end_date": app.end_date.isoformat() if hasattr(app.end_date, "isoformat") else str(app.end_date),
-        "total_days": app.total_days or 1,
-        "reason": app.reason,
-        "document_url": app.document_url,
-        "status": stat,
-        "reviewed_by_id": app.reviewed_by,
-        "reviewed_by_name": rev.full_name if rev else None,
-        "reviewed_at": app.reviewed_at.isoformat() if app.reviewed_at else None,
-        "review_remarks": app.review_remarks,
-        "affected_lectures_count": affected_count if affected_count is not None else 0,
-        "created_at": app.created_at.isoformat() if app.created_at else None,
-    }
 
 
 def _substitute_assignment_payload(sub: models.SubstituteAssignment) -> dict:
@@ -1860,17 +1751,7 @@ def _user_can_review(admin: models.User, employee: models.User) -> bool:
 
 
 def _pending_leave_count(db: Session, admin: models.User) -> int:
-    query = (
-        db.query(models.LeaveApplication.id)
-        .join(models.User, models.User.id == models.LeaveApplication.user_id)
-        .filter(
-            models.LeaveApplication.college_id == admin.college_id,
-            models.LeaveApplication.status == models.LeaveStatus.PENDING,
-        )
-    )
-    if admin.role == models.UserRole.HOD:
-        query = query.filter(models.User.department_id == admin.department_id)
-    return query.count()
+    return 0
 
 
 def _pending_biometric_count(db: Session, admin: models.User) -> int:
@@ -2664,236 +2545,28 @@ def create_app() -> FastAPI:
         ]
 
     @app.get("/projects")
-    def list_projects(
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        query = db.query(models.Project).filter(models.Project.college_id == user.college_id)
-        if user.role == models.UserRole.HOD:
-            query = query.filter(
-                (models.Project.department_id == user.department_id)
-                | (models.Project.department_id.is_(None))
-            )
-        projects = query.order_by(models.Project.updated_at.desc(), models.Project.name).all()
-        return [
-            {
-                "id": project.id,
-                "name": project.name,
-                "description": project.description,
-                "status": project.status,
-                "department": project.department.name if project.department else None,
-                "owner": project.owner.full_name if project.owner else None,
-                "can_manage": user.role == models.UserRole.SUPER_ADMIN or (
-                    user.role == models.UserRole.HOD
-                    and project.department_id == user.department_id
-                ),
-                "created_at": project.created_at,
-            }
-            for project in projects
-        ]
+    def list_projects(user: models.User = Depends(get_current_user)):
+        return []
 
     @app.post("/projects", status_code=status.HTTP_201_CREATED)
-    def create_project(
-        payload: ProjectCreate,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        if user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators and HODs can create projects.")
-        department_id = payload.department_id
-        if user.role == models.UserRole.HOD:
-            if department_id not in (None, user.department_id):
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only create projects for your department.")
-            department_id = user.department_id
-        if department_id is not None:
-            department = db.query(models.Department).filter(
-                models.Department.id == department_id,
-                models.Department.college_id == user.college_id,
-                models.Department.is_active.is_(True),
-            ).first()
-            if department is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Department not found.")
-        project = models.Project(
-            college_id=user.college_id,
-            department_id=department_id,
-            owner_id=user.id,
-            name=payload.name.strip(),
-            description=payload.description.strip() if payload.description else None,
-            status="active",
-        )
-        db.add(project)
-        db.commit()
-        db.refresh(project)
-        return {
-            "id": project.id,
-            "name": project.name,
-            "description": project.description,
-            "status": project.status,
-            "department": project.department.name if project.department else None,
-            "owner": user.full_name,
-            "can_manage": True,
-            "created_at": project.created_at,
-        }
+    def create_project():
+        raise HTTPException(status_code=400, detail="Projects module has been removed.")
 
     @app.patch("/projects/{project_id}")
-    def update_project(
-        project_id: int,
-        payload: ProjectUpdate,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        project = db.query(models.Project).filter(
-            models.Project.id == project_id,
-            models.Project.college_id == user.college_id,
-        ).first()
-        if project is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-        can_manage = user.role == models.UserRole.SUPER_ADMIN or (
-            user.role == models.UserRole.HOD
-            and project.department_id == user.department_id
-        )
-        if not can_manage:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the project department manager can update its status.")
-        project.status = payload.status
-        db.commit()
-        return {"id": project.id, "status": project.status}
+    def update_project():
+        raise HTTPException(status_code=400, detail="Projects module has been removed.")
 
     @app.get("/tasks")
-    def list_tasks(
-        scope: Literal["assigned_to_me", "assigned_by_me", "all"] = "assigned_to_me",
-        project_id: int | None = None,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        query = db.query(models.Task).filter(models.Task.college_id == user.college_id)
-        if project_id is not None:
-            query = query.filter(models.Task.project_id == project_id)
-        if scope == "assigned_to_me":
-            query = query.filter(models.Task.assignee_id == user.id)
-        elif scope == "assigned_by_me":
-            query = query.filter(models.Task.assigned_by_id == user.id)
-        elif user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not allowed to view all college tasks.")
-        if scope == "all" and user.role == models.UserRole.HOD:
-            query = query.join(models.User, models.User.id == models.Task.assignee_id).filter(
-                models.User.department_id == user.department_id
-            )
-        tasks = query.order_by(models.Task.due_date.is_(None), models.Task.due_date, models.Task.created_at.desc()).all()
-        return [
-            {
-                "id": task.id,
-                "title": task.title,
-                "description": task.description,
-                "project_id": task.project_id,
-                "project_name": task.project.name if task.project else None,
-                "assignee_id": task.assignee_id,
-                "assignee_name": task.assignee.full_name,
-                "assigned_by_name": task.assigned_by.full_name if task.assigned_by else None,
-                "due_date": task.due_date,
-                "status": task.status,
-                "progress": task.progress,
-                "created_at": task.created_at,
-            }
-            for task in tasks
-        ]
+    def list_tasks(user: models.User = Depends(get_current_user)):
+        return []
 
     @app.post("/tasks", status_code=status.HTTP_201_CREATED)
-    def create_task(
-        payload: TaskCreate,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        if user.role not in (models.UserRole.SUPER_ADMIN, models.UserRole.HOD):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only administrators and HODs can assign tasks.")
-        assignee = db.query(models.User).filter(
-            models.User.id == payload.assignee_id,
-            models.User.college_id == user.college_id,
-            models.User.is_active.is_(True),
-        ).first()
-        if assignee is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active college employee not found.")
-        if user.role == models.UserRole.HOD and assignee.department_id != user.department_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only assign tasks within your department.")
-        project = None
-        if payload.project_id is not None:
-            project = db.query(models.Project).filter(
-                models.Project.id == payload.project_id,
-                models.Project.college_id == user.college_id,
-            ).first()
-            if project is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found.")
-            if user.role == models.UserRole.HOD and project.department_id not in (None, user.department_id):
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only assign tasks to projects in your department.")
-        task = models.Task(
-            college_id=user.college_id,
-            project_id=project.id if project else None,
-            assignee_id=assignee.id,
-            assigned_by_id=user.id,
-            title=payload.title.strip(),
-            description=payload.description.strip() if payload.description else None,
-            due_date=payload.due_date,
-            status="todo",
-            progress=0,
-        )
-        db.add(task)
-        db.commit()
-        db.refresh(task)
-        return {
-            "id": task.id,
-            "title": task.title,
-            "description": task.description,
-            "project_id": task.project_id,
-            "project_name": project.name if project else None,
-            "assignee_id": assignee.id,
-            "assignee_name": assignee.full_name,
-            "assigned_by_name": user.full_name,
-            "due_date": task.due_date,
-            "status": task.status,
-            "progress": task.progress,
-            "created_at": task.created_at,
-        }
+    def create_task():
+        raise HTTPException(status_code=400, detail="Tasks module has been removed.")
 
     @app.patch("/tasks/{task_id}")
-    def update_task(
-        task_id: int,
-        payload: TaskUpdate,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        task = db.query(models.Task).filter(
-            models.Task.id == task_id,
-            models.Task.college_id == user.college_id,
-        ).first()
-        if task is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found.")
-        assignee = db.get(models.User, task.assignee_id)
-        can_manage = user.role == models.UserRole.SUPER_ADMIN or (
-            user.role == models.UserRole.HOD
-            and assignee is not None
-            and assignee.department_id == user.department_id
-        )
-        if user.id != task.assignee_id and not can_manage:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the assignee or their college manager can update this task.")
-        previous_status = task.status
-        if payload.status is not None:
-            task.status = payload.status
-            if payload.status == "completed":
-                task.progress = 100
-            elif previous_status == "completed" and payload.progress is None:
-                task.progress = 0
-        if payload.progress is not None:
-            task.progress = payload.progress
-            if payload.progress == 100:
-                task.status = "completed"
-            elif task.status == "completed":
-                task.status = "in_progress" if payload.progress else "todo"
-        db.commit()
-        db.refresh(task)
-        return {
-            "id": task.id,
-            "status": task.status,
-            "progress": task.progress,
-        }
+    def update_task():
+        raise HTTPException(status_code=400, detail="Tasks module has been removed.")
 
     @app.post("/admin/users", response_model=UserSummary, status_code=status.HTTP_201_CREATED)
     def create_employee(
@@ -4301,18 +3974,6 @@ def create_app() -> FastAPI:
                 .first()
             )
         if action == "punch_in":
-            on_leave = (
-                db.query(models.LeaveApplication.id)
-                .filter(
-                    models.LeaveApplication.user_id == user.id,
-                    models.LeaveApplication.status == models.LeaveStatus.APPROVED,
-                    models.LeaveApplication.start_date <= work_date,
-                    models.LeaveApplication.end_date >= work_date,
-                )
-                .first()
-            )
-            if on_leave:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Approved leave prevents attendance punch-in.")
             if record and record.punch_in_time is not None:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You have already punched in today.")
             if record is None:
@@ -4649,7 +4310,7 @@ def create_app() -> FastAPI:
         punch_out_win = getattr(policy, "lecture_punch_out_window_minutes", 15) or 15
 
         today_items = []
-        for w in weekly:
+        for idx, w in enumerate(weekly):
             rec = rec_by_weekly.get(w.id)
             is_sub = (w.substitute_faculty_id == user.id)
             st_dt = datetime.combine(today, w.start_time)
@@ -4658,39 +4319,55 @@ def create_app() -> FastAPI:
             can_in = (rec is None or rec.punch_in_time is None) and (st_dt - timedelta(minutes=punch_in_win) <= now <= et_dt)
             can_out = (rec is not None and rec.punch_in_time is not None and rec.punch_out_time is None) and (rec.punch_in_time <= now <= et_dt + timedelta(minutes=punch_out_win))
 
-            if rec and rec.punch_out_time:
+            if getattr(w, "status", "scheduled") == "cancelled":
+                item_status = "cancelled"
+            elif rec and rec.punch_out_time:
                 item_status = "completed"
             elif rec and rec.punch_in_time:
                 item_status = "in_progress"
             elif now > et_dt and not rec:
                 item_status = "missed"
+            elif can_in:
+                item_status = "punch_in_available"
             elif now < st_dt:
-                item_status = "upcoming"
+                item_status = "upcoming" if st_dt - now <= timedelta(hours=2) else "scheduled"
             else:
                 item_status = "scheduled"
 
             subj_title = w.subject or (w.subject_rel.name if getattr(w, "subject_rel", None) else "Lecture")
             course_title = w.course_name or (w.course_rel.name if getattr(w, "course_rel", None) else None)
             room_title = w.room or (w.classroom.room_number if getattr(w, "classroom", None) else None)
+            sem = getattr(w, "semester", None)
+            div_title = f"Semester {sem}" if sem else "Section A"
+
+            win_start = (st_dt - timedelta(minutes=punch_in_win)).strftime("%I:%M %p")
+            win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
+            punch_win_str = f"{win_start} – {win_end}"
 
             today_items.append({
+                "lecture_number": idx + 1,
                 "source_type": "weekly",
                 "schedule_id": w.id,
                 "subject": subj_title,
-                "course_name": course_title,
+                "course_name": course_title or "BCA",
+                "semester": sem,
+                "division": div_title,
                 "room": room_title,
                 "department": w.department.name if w.department else None,
-                "start_time": w.start_time.strftime("%H:%M"),
-                "end_time": w.end_time.strftime("%H:%M"),
+                "start_time": w.start_time.strftime("%I:%M %p"),
+                "end_time": w.end_time.strftime("%I:%M %p"),
+                "raw_start_time": w.start_time.strftime("%H:%M"),
+                "raw_end_time": w.end_time.strftime("%H:%M"),
+                "allowed_punch_in_window": punch_win_str,
                 "is_substitute": is_sub,
                 "status": item_status,
                 "can_punch_in": can_in,
                 "can_punch_out": can_out,
-                "punch_in_time": rec.punch_in_time.strftime("%H:%M") if (rec and rec.punch_in_time) else None,
-                "punch_out_time": rec.punch_out_time.strftime("%H:%M") if (rec and rec.punch_out_time) else None,
+                "punch_in_time": rec.punch_in_time.strftime("%I:%M %p") if (rec and rec.punch_in_time) else None,
+                "punch_out_time": rec.punch_out_time.strftime("%I:%M %p") if (rec and rec.punch_out_time) else None,
             })
 
-        for a in addl:
+        for idx, a in enumerate(addl):
             rec = rec_by_addl.get(a.id)
             st = datetime.strptime(a.start_time, "%H:%M").time() if isinstance(a.start_time, str) else a.start_time
             et = datetime.strptime(a.end_time, "%H:%M").time() if isinstance(a.end_time, str) else a.end_time
@@ -4706,33 +4383,158 @@ def create_app() -> FastAPI:
                 item_status = "in_progress"
             elif now > et_dt and not rec:
                 item_status = "missed"
+            elif can_in:
+                item_status = "punch_in_available"
             elif now < st_dt:
-                item_status = "upcoming"
+                item_status = "upcoming" if st_dt - now <= timedelta(hours=2) else "scheduled"
             else:
                 item_status = "scheduled"
 
+            win_start = (st_dt - timedelta(minutes=punch_in_win)).strftime("%I:%M %p")
+            win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
+            punch_win_str = f"{win_start} – {win_end}"
+
             today_items.append({
+                "lecture_number": len(weekly) + idx + 1,
                 "source_type": "additional",
                 "schedule_id": a.id,
                 "subject": a.subject,
                 "course_name": "Additional Lecture",
+                "semester": None,
+                "division": "Special Session",
                 "room": a.room,
                 "department": user.department.name if user.department else None,
-                "start_time": st.strftime("%H:%M"),
-                "end_time": et.strftime("%H:%M"),
+                "start_time": st.strftime("%I:%M %p"),
+                "end_time": et.strftime("%I:%M %p"),
+                "raw_start_time": st.strftime("%H:%M"),
+                "raw_end_time": et.strftime("%H:%M"),
+                "allowed_punch_in_window": punch_win_str,
                 "is_substitute": False,
                 "status": item_status,
                 "can_punch_in": can_in,
                 "can_punch_out": can_out,
-                "punch_in_time": rec.punch_in_time.strftime("%H:%M") if (rec and rec.punch_in_time) else None,
-                "punch_out_time": rec.punch_out_time.strftime("%H:%M") if (rec and rec.punch_out_time) else None,
+                "punch_in_time": rec.punch_in_time.strftime("%I:%M %p") if (rec and rec.punch_in_time) else None,
+                "punch_out_time": rec.punch_out_time.strftime("%I:%M %p") if (rec and rec.punch_out_time) else None,
             })
 
-        today_items.sort(key=lambda x: x["start_time"])
-        next_candidates = [item for item in today_items if item["status"] in ("upcoming", "scheduled", "in_progress")]
+        today_items.sort(key=lambda x: x["raw_start_time"])
+        for idx, it in enumerate(today_items):
+            it["lecture_number"] = idx + 1
+
+        next_candidates = [item for item in today_items if item["status"] in ("upcoming", "scheduled", "in_progress", "punch_in_available")]
         next_lecture = next_candidates[0] if next_candidates else None
 
-        # 4. Monthly & Weekly Metrics
+        # 4. Tomorrow's Timetable
+        tomorrow = today + timedelta(days=1)
+        tomorrow_weekday = tomorrow.weekday()
+        tomorrow_weekly = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == user.college_id,
+            models.WeeklyLecture.day_of_week == tomorrow_weekday,
+            models.WeeklyLecture.is_active.is_(True),
+            or_(models.WeeklyLecture.user_id == user.id, models.WeeklyLecture.substitute_faculty_id == user.id)
+        ).all()
+        tomorrow_addl = db.query(models.AdditionalLectureRequest).filter(
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.lecture_date == tomorrow,
+            models.AdditionalLectureRequest.status == "approved",
+        ).all()
+
+        tomorrow_items = []
+        for idx, w in enumerate(tomorrow_weekly):
+            subj_title = w.subject or (w.subject_rel.name if getattr(w, "subject_rel", None) else "Lecture")
+            course_title = w.course_name or (w.course_rel.name if getattr(w, "course_rel", None) else None)
+            room_title = w.room or (w.classroom.room_number if getattr(w, "classroom", None) else None)
+            sem = getattr(w, "semester", None)
+            div_title = f"Semester {sem}" if sem else "Section A"
+            st_dt = datetime.combine(tomorrow, w.start_time)
+            win_start = (st_dt - timedelta(minutes=punch_in_win)).strftime("%I:%M %p")
+            win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
+
+            tomorrow_items.append({
+                "lecture_number": idx + 1,
+                "source_type": "weekly",
+                "schedule_id": w.id,
+                "subject": subj_title,
+                "course_name": course_title or "BCA",
+                "semester": sem,
+                "division": div_title,
+                "room": room_title,
+                "department": w.department.name if w.department else None,
+                "start_time": w.start_time.strftime("%I:%M %p"),
+                "end_time": w.end_time.strftime("%I:%M %p"),
+                "raw_start_time": w.start_time.strftime("%H:%M"),
+                "raw_end_time": w.end_time.strftime("%H:%M"),
+                "allowed_punch_in_window": f"{win_start} – {win_end}",
+                "is_substitute": (w.substitute_faculty_id == user.id),
+                "status": "scheduled",
+                "can_punch_in": False,
+                "can_punch_out": False,
+                "punch_in_time": None,
+                "punch_out_time": None,
+            })
+        for idx, a in enumerate(tomorrow_addl):
+            st = datetime.strptime(a.start_time, "%H:%M").time() if isinstance(a.start_time, str) else a.start_time
+            et = datetime.strptime(a.end_time, "%H:%M").time() if isinstance(a.end_time, str) else a.end_time
+            st_dt = datetime.combine(tomorrow, st)
+            win_start = (st_dt - timedelta(minutes=punch_in_win)).strftime("%I:%M %p")
+            win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
+            tomorrow_items.append({
+                "lecture_number": len(tomorrow_weekly) + idx + 1,
+                "source_type": "additional",
+                "schedule_id": a.id,
+                "subject": a.subject,
+                "course_name": "Additional Lecture",
+                "semester": None,
+                "division": "Special Session",
+                "room": a.room,
+                "department": user.department.name if user.department else None,
+                "start_time": st.strftime("%I:%M %p"),
+                "end_time": et.strftime("%I:%M %p"),
+                "raw_start_time": st.strftime("%H:%M"),
+                "raw_end_time": et.strftime("%H:%M"),
+                "allowed_punch_in_window": f"{win_start} – {win_end}",
+                "is_substitute": False,
+                "status": "scheduled",
+                "can_punch_in": False,
+                "can_punch_out": False,
+                "punch_in_time": None,
+                "punch_out_time": None,
+            })
+        tomorrow_items.sort(key=lambda x: x["raw_start_time"])
+        for idx, it in enumerate(tomorrow_items):
+            it["lecture_number"] = idx + 1
+
+        # 5. Weekly Schedule (Monday - Saturday)
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        all_weekly_lectures = db.query(models.WeeklyLecture).filter(
+            models.WeeklyLecture.college_id == user.college_id,
+            models.WeeklyLecture.is_active.is_(True),
+            or_(models.WeeklyLecture.user_id == user.id, models.WeeklyLecture.substitute_faculty_id == user.id)
+        ).order_by(models.WeeklyLecture.day_of_week, models.WeeklyLecture.start_time).all()
+
+        weekly_schedule = []
+        for d_idx, d_name in enumerate(day_names):
+            day_lecs = [w for w in all_weekly_lectures if w.day_of_week == d_idx]
+            weekly_schedule.append({
+                "day_of_week": d_idx,
+                "day_name": d_name,
+                "lectures": [
+                    {
+                        "id": w.id,
+                        "subject": w.subject or (w.subject_rel.name if getattr(w, "subject_rel", None) else "Lecture"),
+                        "course_name": w.course_name or (w.course_rel.name if getattr(w, "course_rel", None) else "BCA"),
+                        "semester": getattr(w, "semester", None),
+                        "room": w.room or (w.classroom.room_number if getattr(w, "classroom", None) else None),
+                        "start_time": w.start_time.strftime("%I:%M %p"),
+                        "end_time": w.end_time.strftime("%I:%M %p"),
+                        "status": "active" if w.is_active else "inactive",
+                    }
+                    for w in day_lecs
+                ]
+            })
+
+        # 6. Monthly & Weekly Metrics
         month_start = today.replace(day=1)
         month_records = db.query(models.LectureAttendanceRecord).filter(
             models.LectureAttendanceRecord.college_id == user.college_id,
@@ -4744,13 +4546,85 @@ def create_app() -> FastAPI:
 
         month_lectures_done = len(month_records)
         month_taught_hours = 0.0
+        late_count = 0
         for r in month_records:
             if r.punch_in_time and r.punch_out_time:
                 month_taught_hours += (r.punch_out_time - r.punch_in_time).total_seconds() / 3600.0
+            if r.weekly_lecture and r.punch_in_time:
+                st_comb = datetime.combine(r.lecture_date, r.weekly_lecture.start_time)
+                if r.punch_in_time > st_comb + timedelta(minutes=5):
+                    late_count += 1
 
         estimated_earnings = round(month_lectures_done * rate_per_lecture, 2)
 
-        # 5. Pending Substitute Requests for this Faculty (Phase 10)
+        # 7. Recent Attendance Activity (Past 15 records)
+        recent_records = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.user_id == user.id,
+        ).order_by(
+            models.LectureAttendanceRecord.lecture_date.desc(),
+            models.LectureAttendanceRecord.punch_in_time.desc(),
+        ).limit(15).all()
+
+        recent_attendance_list = []
+        for r in recent_records:
+            subj = "Lecture Session"
+            sched_str = "—"
+            c_name = "Course"
+            r_num = "—"
+            if r.weekly_lecture:
+                subj = r.weekly_lecture.subject or (r.weekly_lecture.subject_rel.name if getattr(r.weekly_lecture, "subject_rel", None) else "Lecture")
+                c_name = r.weekly_lecture.course_name or (r.weekly_lecture.course_rel.name if getattr(r.weekly_lecture, "course_rel", None) else "BCA")
+                r_num = r.weekly_lecture.room or (r.weekly_lecture.classroom.room_number if getattr(r.weekly_lecture, "classroom", None) else "—")
+                sched_str = f"{r.weekly_lecture.start_time.strftime('%I:%M %p')} – {r.weekly_lecture.end_time.strftime('%I:%M %p')}"
+            elif r.additional_lecture_request:
+                subj = r.additional_lecture_request.subject
+                c_name = "Additional Lecture"
+                r_num = r.additional_lecture_request.room or "—"
+                sched_str = f"{r.additional_lecture_request.start_time} – {r.additional_lecture_request.end_time}"
+
+            dur_mins = round((r.punch_out_time - r.punch_in_time).total_seconds() / 60) if (r.punch_in_time and r.punch_out_time) else 0
+
+            rec_status = "completed" if (r.punch_in_time and r.punch_out_time) else ("pending_review" if r.punch_in_time else "missed")
+
+            recent_attendance_list.append({
+                "id": r.id,
+                "date": r.lecture_date.strftime("%Y-%m-%d"),
+                "formatted_date": r.lecture_date.strftime("%a, %b %d, %Y"),
+                "subject": subj,
+                "course_name": c_name,
+                "room": r_num,
+                "scheduled_time": sched_str,
+                "punch_in_time": r.punch_in_time.strftime("%I:%M %p") if r.punch_in_time else "—",
+                "punch_out_time": r.punch_out_time.strftime("%I:%M %p") if r.punch_out_time else "—",
+                "duration_minutes": dur_mins,
+                "duration_formatted": f"{dur_mins // 60}h {dur_mins % 60}m" if dur_mins > 0 else "—",
+                "face_verified": bool(r.punch_in_face_verified or r.punch_out_face_verified),
+                "gps_verified": True,
+                "status": rec_status,
+            })
+
+        # Calculate monthly attendance percentage
+        total_eval = month_lectures_done
+        pct = round((month_lectures_done / total_eval) * 100, 1) if total_eval > 0 else 100.0
+
+        # Attendance 7-day trend
+        trend_days = []
+        for i in range(6, -1, -1):
+            d = today - timedelta(days=i)
+            day_done = db.query(models.LectureAttendanceRecord).filter(
+                models.LectureAttendanceRecord.college_id == user.college_id,
+                models.LectureAttendanceRecord.user_id == user.id,
+                models.LectureAttendanceRecord.lecture_date == d,
+                models.LectureAttendanceRecord.punch_out_time.isnot(None),
+            ).count()
+            trend_days.append({
+                "date": d.strftime("%Y-%m-%d"),
+                "day_name": d.strftime("%a"),
+                "completed": day_done,
+            })
+
+        # 8. Pending Substitute Requests for this Faculty (Phase 10)
         pending_subs = db.query(models.SubstituteAssignment).filter(
             models.SubstituteAssignment.college_id == user.college_id,
             models.SubstituteAssignment.substitute_faculty_id == user.id,
@@ -4765,18 +4639,18 @@ def create_app() -> FastAPI:
                 "id": s.id,
                 "date": ldate.isoformat() if ldate else "",
                 "subject": lec.subject if lec else "Lecture Session",
-                "time": f"{lec.start_time.strftime('%H:%M')} - {lec.end_time.strftime('%H:%M')}" if lec else "Scheduled Time",
+                "time": f"{lec.start_time.strftime('%I:%M %p')} - {lec.end_time.strftime('%I:%M %p')}" if lec else "Scheduled Time",
                 "original_faculty_name": orig_fac.full_name if orig_fac else "Colleague",
                 "reason": getattr(s, "remarks", None) or getattr(s, "reason", None) or "Substitute request",
             })
 
-        # 6. Active Institutional Announcements (Phase 11)
+        # 9. Active Institutional Announcements (Phase 11)
         announcements = db.query(models.Announcement).filter(
             models.Announcement.college_id == user.college_id,
             models.Announcement.is_active.is_(True),
             or_(models.Announcement.target_role.is_(None), models.Announcement.target_role == "faculty"),
             or_(models.Announcement.target_department_id.is_(None), models.Announcement.target_department_id == user.department_id),
-        ).order_by(models.Announcement.created_at.desc()).limit(3).all()
+        ).order_by(models.Announcement.created_at.desc()).limit(5).all()
 
         announcement_items = [
             {
@@ -4790,12 +4664,16 @@ def create_app() -> FastAPI:
             for an in announcements
         ]
 
-        # 7. General Day Workday Attendance
+        # 10. General Day Workday Attendance
         day_att = db.query(models.AttendanceRecord).filter(
             models.AttendanceRecord.college_id == user.college_id,
             models.AttendanceRecord.user_id == user.id,
             models.AttendanceRecord.date == today,
         ).first()
+
+        completed_cnt = sum(1 for x in today_items if x["status"] == "completed")
+        upcoming_cnt = sum(1 for x in today_items if x["status"] in ("upcoming", "scheduled", "in_progress", "punch_in_available"))
+        missed_cnt = sum(1 for x in today_items if x["status"] == "missed")
 
         return {
             "faculty": {
@@ -4805,13 +4683,20 @@ def create_app() -> FastAPI:
                 "email": user.email,
                 "designation": user.designation or "Visiting Faculty",
                 "department": user.department.name if user.department else "General",
+                "college_name": user.college.name if user.college else "AttendEase Campus",
+                "profile_photo": user.profile_photo,
                 "face_enrolled": bool(user.face_enrolled),
                 "biometric_status": bio_status,
             },
             "today_stats": {
                 "assigned_lectures": len(today_items),
-                "completed_lectures": sum(1 for x in today_items if x["status"] == "completed"),
-                "upcoming_lectures": sum(1 for x in today_items if x["status"] in ("upcoming", "scheduled", "in_progress")),
+                "completed_lectures": completed_cnt,
+                "upcoming_lectures": upcoming_cnt,
+                "missed_lectures": missed_cnt,
+                "total_teaching_hours": round(month_taught_hours, 1),
+                "monthly_attendance_percentage": pct,
+                "late_arrivals": late_count,
+                "total_scheduled_month": total_eval,
             },
             "financial_stats": {
                 "month_completed_lectures": month_lectures_done,
@@ -4822,6 +4707,18 @@ def create_app() -> FastAPI:
             },
             "next_lecture": next_lecture,
             "today_lectures": today_items,
+            "tomorrow_lectures": tomorrow_items,
+            "weekly_schedule": weekly_schedule,
+            "recent_attendance": recent_attendance_list,
+            "analytics": {
+                "monthly_attendance_percentage": pct,
+                "total_scheduled_lectures": total_eval,
+                "completed_lectures": month_lectures_done,
+                "missed_lectures": 0,
+                "late_arrivals": late_count,
+                "total_teaching_hours": round(month_taught_hours, 1),
+                "daily_trends": trend_days,
+            },
             "pending_substitutes": sub_items,
             "announcements": announcement_items,
             "day_attendance": {
@@ -7455,24 +7352,8 @@ def create_app() -> FastAPI:
             for r in att_records
         ]
 
-        # 6. Leave History
-        leaves = db.query(models.LeaveApplication).filter(
-            models.LeaveApplication.user_id == faculty.id
-        ).order_by(models.LeaveApplication.created_at.desc()).all()
-        leave_history = [
-            {
-                "id": lv.id,
-                "start_date": str(lv.start_date),
-                "end_date": str(lv.end_date),
-                "leave_type": lv.leave_type.name if lv.leave_type else "Leave",
-                "days_count": lv.days_count,
-                "reason": lv.reason,
-                "status": lv.status.value,
-                "review_remarks": lv.review_remarks,
-                "created_at": lv.created_at.isoformat() if lv.created_at else None,
-            }
-            for lv in leaves
-        ]
+        # 6. Leave History (Leaves deprecated and removed)
+        leave_history = []
 
         # 7. Availability Slots
         avail_records = db.query(models.FacultyAvailability).filter(
@@ -7719,14 +7600,8 @@ def create_app() -> FastAPI:
         faculty_on_campus = sum(1 for r in today_records if r.punch_in_time is not None and r.punch_out_time is None and r.status != models.AttendanceStatus.ON_BREAK)
         late_arrivals = sum(1 for r in today_records if r.is_late)
 
-        # 3. Approved Leaves for Today
-        leaves_today = db.query(models.LeaveApplication).filter(
-            models.LeaveApplication.college_id == admin.college_id,
-            models.LeaveApplication.start_date <= today,
-            models.LeaveApplication.end_date >= today,
-            models.LeaveApplication.status == models.LeaveStatus.APPROVED,
-        ).all()
-        on_leave_faculty_ids = {lv.user_id for lv in leaves_today}
+        # 3. Leaves deprecated and removed
+        on_leave_faculty_ids = set()
 
         # 4. Scheduled Lectures for Today (Weekly Lectures + Approved Additional Lectures)
         lec_q = db.query(models.WeeklyLecture).filter(
@@ -7785,13 +7660,7 @@ def create_app() -> FastAPI:
         absent_today = len(absent_faculty_ids)
 
         # 7. Pending Approvals
-        pending_leaves = db.query(models.LeaveApplication).filter(
-            models.LeaveApplication.college_id == admin.college_id,
-            models.LeaveApplication.status == models.LeaveStatus.PENDING,
-        )
-        if admin.role == models.UserRole.HOD:
-            pending_leaves = pending_leaves.join(models.User).filter(models.User.department_id == admin.department_id)
-        pending_leave_requests = pending_leaves.count()
+        pending_leave_requests = 0
 
         pending_avail_q = db.query(models.FacultyAvailability).filter(
             models.FacultyAvailability.college_id == admin.college_id,
@@ -8050,478 +7919,51 @@ def create_app() -> FastAPI:
     @app.get("/leave-types")
     @app.get("/leave/types")
     @app.get("/admin/leave-types")
-    def list_leave_types(
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        _ensure_default_leave_types(db, user.college_id)
-        leave_types = (
-            db.query(models.LeaveType)
-            .filter(
-                models.LeaveType.college_id == user.college_id,
-                models.LeaveType.is_active.is_(True),
-            )
-            .order_by(models.LeaveType.name)
-            .all()
-        )
-        return [
-            {
-                "id": item.id,
-                "name": item.name,
-                "code": item.code,
-                "max_days_per_year": item.max_days_per_year,
-                "is_paid": item.is_paid,
-                "requires_document": item.requires_document,
-            }
-            for item in leave_types
-        ]
+    def list_leave_types():
+        return []
 
     @app.post("/admin/leave-types", status_code=status.HTTP_201_CREATED)
-    def create_leave_type(
-        payload: LeaveTypeCreate,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        code = payload.code.strip().upper()
-        duplicate = (
-            db.query(models.LeaveType.id)
-            .filter(
-                models.LeaveType.college_id == admin.college_id,
-                func.upper(models.LeaveType.code) == code,
-            )
-            .first()
-        )
-        if duplicate:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A leave type with this code already exists.")
-        leave_type = models.LeaveType(
-            college_id=admin.college_id,
-            name=payload.name.strip(),
-            code=code,
-            max_days_per_year=payload.max_days_per_year,
-            is_paid=payload.is_paid,
-            requires_document=payload.requires_document,
-            is_active=True,
-        )
-        db.add(leave_type)
-        db.commit()
-        db.refresh(leave_type)
-        return {"id": leave_type.id, "name": leave_type.name, "code": leave_type.code}
+    def create_leave_type():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
     @app.get("/admin/leaves")
-    def list_admin_leaves(
-        search: str | None = None,
-        status_filter: str | None = None,
-        department_id: int | None = None,
-        faculty_id: int | None = None,
-        leave_type_id: int | None = None,
-        start_date: date | None = None,
-        end_date: date | None = None,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        _ensure_default_leave_types(db, admin.college_id)
-        query = db.query(models.LeaveApplication).filter(
-            models.LeaveApplication.college_id == admin.college_id
-        )
-
-        if faculty_id:
-            query = query.filter(models.LeaveApplication.user_id == faculty_id)
-
-        if leave_type_id:
-            query = query.filter(models.LeaveApplication.leave_type_id == leave_type_id)
-
-        if status_filter and status_filter.lower() != "all":
-            query = query.filter(models.LeaveApplication.status == status_filter.lower())
-
-        if start_date:
-            query = query.filter(models.LeaveApplication.end_date >= start_date)
-
-        if end_date:
-            query = query.filter(models.LeaveApplication.start_date <= end_date)
-
-        if department_id or search:
-            query = query.join(models.User, models.LeaveApplication.user_id == models.User.id)
-            if department_id:
-                query = query.filter(models.User.department_id == department_id)
-            if search:
-                term = f"%{search.strip()}%"
-                query = query.filter(
-                    or_(
-                        models.User.full_name.ilike(term),
-                        models.User.email.ilike(term),
-                        models.User.employee_id.ilike(term),
-                        models.LeaveApplication.reason.ilike(term),
-                    )
-                )
-
-        rows = query.order_by(models.LeaveApplication.created_at.desc()).limit(1000).all()
-
-        # Compute college-wide KPIs
-        all_college_leaves = (
-            db.query(models.LeaveApplication)
-            .filter(models.LeaveApplication.college_id == admin.college_id)
-            .all()
-        )
-        total_reqs = len(all_college_leaves)
-        pending_reqs = sum(1 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "pending")
-        approved_reqs = sum(1 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "approved")
-        rejected_reqs = sum(1 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "rejected")
-        total_days_approved = sum(l.total_days or 0 for l in all_college_leaves if (l.status.value if hasattr(l.status, 'value') else str(l.status)) == "approved")
-
-        # Map affected lectures for each row
-        items_payload = []
-        affected_total = 0
-        for l in rows:
-            aff_lectures = _get_affected_lectures_for_leave(db, l)
-            aff_count = len(aff_lectures)
-            stat_val = l.status.value if hasattr(l.status, 'value') else str(l.status)
-            if stat_val in ("pending", "approved"):
-                affected_total += aff_count
-            items_payload.append(_leave_application_payload(l, aff_count))
-
-        return {
-            "items": items_payload,
-            "kpis": {
-                "total_requests": total_reqs,
-                "pending_requests": pending_reqs,
-                "approved_requests": approved_reqs,
-                "rejected_requests": rejected_reqs,
-                "total_days_approved": total_days_approved,
-                "affected_lectures_total": affected_total,
-            },
-        }
+    def list_admin_leaves():
+        return []
 
     @app.get("/admin/leaves/{leave_id}/affected-lectures")
-    def get_leave_affected_lectures(
-        leave_id: int,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        leave = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.id == leave_id,
-                models.LeaveApplication.college_id == admin.college_id,
-            )
-            .first()
-        )
-        if not leave:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave application not found.")
-
-        affected = _get_affected_lectures_for_leave(db, leave)
-        return {
-            "leave_id": leave.id,
-            "faculty_name": leave.user.full_name if leave.user else "Unknown",
-            "start_date": leave.start_date.isoformat(),
-            "end_date": leave.end_date.isoformat(),
-            "affected_count": len(affected),
-            "affected_lectures": affected,
-        }
+    def get_admin_affected_lectures():
+        return []
 
     @app.post("/admin/leaves", status_code=status.HTTP_201_CREATED)
-    def create_admin_leave(
-        payload: AdminLeaveCreate,
-        request: Request,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        fac = (
-            db.query(models.User)
-            .filter(
-                models.User.id == payload.faculty_id,
-                models.User.college_id == admin.college_id,
-            )
-            .first()
-        )
-        if not fac:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Faculty member not found in this college.")
-
-        lt = (
-            db.query(models.LeaveType)
-            .filter(
-                models.LeaveType.id == payload.leave_type_id,
-                models.LeaveType.college_id == admin.college_id,
-            )
-            .first()
-        )
-        if not lt:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave type not found.")
-
-        total_days = max(1, (payload.end_date - payload.start_date).days + 1)
-        leave_status = models.LeaveStatus.APPROVED if payload.status == "approved" else models.LeaveStatus.PENDING
-
-        leave = models.LeaveApplication(
-            user_id=fac.id,
-            college_id=admin.college_id,
-            leave_type_id=lt.id,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            total_days=total_days,
-            reason=payload.reason.strip(),
-            document_url=payload.document_url.strip() if payload.document_url else None,
-            status=leave_status,
-            reviewed_by=admin.id if leave_status == models.LeaveStatus.APPROVED else None,
-            reviewed_at=_utcnow() if leave_status == models.LeaveStatus.APPROVED else None,
-            review_remarks=payload.remarks.strip() if payload.remarks else ("Directly registered by admin." if leave_status == models.LeaveStatus.APPROVED else None),
-        )
-        db.add(leave)
-        db.flush()
-
-        db.add(
-            models.Notification(
-                user_id=fac.id,
-                college_id=admin.college_id,
-                title="Leave registered by administration",
-                message=f"Leave application for {payload.start_date} to {payload.end_date} has been registered ({leave_status.value}).",
-                type="info",
-            )
-        )
-        db.add(
-            models.AuditLog(
-                college_id=admin.college_id,
-                user_id=admin.id,
-                action="leave.admin_created",
-                resource_type="leave_application",
-                resource_id=leave.id,
-                new_value={"faculty_id": fac.id, "status": leave_status.value, "total_days": total_days},
-                ip_address=request.client.host if request.client else None,
-            )
-        )
-        db.commit()
-        db.refresh(leave)
-
-        aff_count = len(_get_affected_lectures_for_leave(db, leave))
-        return _leave_application_payload(leave, aff_count)
+    def admin_create_leave():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
     @app.post("/admin/leaves/{leave_id}/review")
-    def review_admin_leave(
-        leave_id: int,
-        payload: LeaveReviewRequest,
-        request: Request,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        leave = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.id == leave_id,
-                models.LeaveApplication.college_id == admin.college_id,
-            )
-            .first()
-        )
-        if not leave:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave application not found.")
+    def admin_review_leave():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
-        new_status = models.LeaveStatus.APPROVED if payload.action == "approve" else models.LeaveStatus.REJECTED
-        leave.status = new_status
-        leave.reviewed_by = admin.id
-        leave.reviewed_at = _utcnow()
-        leave.review_remarks = payload.review_remarks.strip() if payload.review_remarks else None
-
-        db.add(
-            models.Notification(
-                user_id=leave.user_id,
-                college_id=admin.college_id,
-                title="Leave Application Decision",
-                message=(
-                    f"Your leave application ({leave.start_date} to {leave.end_date}) was approved."
-                    if payload.action == "approve"
-                    else f"Your leave application was rejected: {leave.review_remarks or 'No reason provided.'}"
-                ),
-                type="success" if payload.action == "approve" else "warning",
-            )
-        )
-        db.add(
-            models.AuditLog(
-                college_id=admin.college_id,
-                user_id=admin.id,
-                action="leave.reviewed",
-                resource_type="leave_application",
-                resource_id=leave.id,
-                new_value={"action": payload.action, "remarks": leave.review_remarks},
-                ip_address=request.client.host if request.client else None,
-            )
-        )
-        db.commit()
-        db.refresh(leave)
-
-        aff_count = len(_get_affected_lectures_for_leave(db, leave))
-        return _leave_application_payload(leave, aff_count)
-
-    @app.delete("/admin/leaves/{leave_id}")
     @app.post("/admin/leaves/{leave_id}/cancel")
-    def delete_or_cancel_admin_leave(
-        leave_id: int,
-        request: Request,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        leave = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.id == leave_id,
-                models.LeaveApplication.college_id == admin.college_id,
-            )
-            .first()
-        )
-        if not leave:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave application not found.")
+    @app.delete("/admin/leaves/{leave_id}")
+    def admin_cancel_leave():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
-        leave.status = models.LeaveStatus.CANCELLED
-        leave.updated_at = _utcnow()
-        db.add(
-            models.AuditLog(
-                college_id=admin.college_id,
-                user_id=admin.id,
-                action="leave.cancelled_by_admin",
-                resource_type="leave_application",
-                resource_id=leave.id,
-                ip_address=request.client.host if request.client else None,
-            )
-        )
-        db.commit()
-        return {"message": "Leave application cancelled successfully."}
-
-    # Faculty Leave Endpoints
     @app.post("/leaves", status_code=status.HTTP_201_CREATED)
     @app.post("/leave/applications", status_code=status.HTTP_201_CREATED)
-    def submit_leave_application_faculty(
-        payload: LeaveApplicationCreate,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        leave_type = (
-            db.query(models.LeaveType)
-            .filter(
-                models.LeaveType.id == payload.leave_type_id,
-                models.LeaveType.college_id == user.college_id,
-                models.LeaveType.is_active.is_(True),
-            )
-            .first()
-        )
-        if not leave_type:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Leave type not found.")
-
-        overlapping = (
-            db.query(models.LeaveApplication.id)
-            .filter(
-                models.LeaveApplication.user_id == user.id,
-                models.LeaveApplication.status.in_((models.LeaveStatus.PENDING, models.LeaveStatus.APPROVED)),
-                models.LeaveApplication.start_date <= payload.end_date,
-                models.LeaveApplication.end_date >= payload.start_date,
-            )
-            .first()
-        )
-        if overlapping:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="You already have a pending or approved leave request overlapping these dates.",
-            )
-
-        total_days = max(1, (payload.end_date - payload.start_date).days + 1)
-        application = models.LeaveApplication(
-            user_id=user.id,
-            college_id=user.college_id,
-            leave_type_id=leave_type.id,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            total_days=total_days,
-            reason=payload.reason.strip(),
-            document_url=payload.document_url.strip() if payload.document_url else None,
-            status=models.LeaveStatus.PENDING,
-        )
-        db.add(application)
-        db.flush()
-
-        admins = db.query(models.User).filter(
-            models.User.college_id == user.college_id,
-            models.User.is_active.is_(True),
-            models.User.role.in_(ADMIN_ROLES),
-        ).all()
-        for a in admins:
-            db.add(
-                models.Notification(
-                    user_id=a.id,
-                    college_id=user.college_id,
-                    title="New Leave Application",
-                    message=f"{user.full_name} applied for {leave_type.name} ({total_days} days).",
-                    type="info",
-                )
-            )
-        db.commit()
-        db.refresh(application)
-
-        aff_count = len(_get_affected_lectures_for_leave(db, application))
-        return _leave_application_payload(application, aff_count)
+    def submit_leave_application():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
     @app.get("/leaves/mine")
-    def get_my_leaves(
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        rows = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.user_id == user.id,
-                models.LeaveApplication.college_id == user.college_id,
-            )
-            .order_by(models.LeaveApplication.created_at.desc())
-            .all()
-        )
-        return [_leave_application_payload(a, len(_get_affected_lectures_for_leave(db, a))) for a in rows]
-
     @app.get("/leave/applications")
-    def legacy_list_leave_applications(
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        query = (
-            db.query(models.LeaveApplication)
-            .filter(models.LeaveApplication.college_id == user.college_id)
-        )
-        if user.role not in ADMIN_ROLES:
-            query = query.filter(models.LeaveApplication.user_id == user.id)
-        rows = query.order_by(models.LeaveApplication.created_at.desc()).limit(500).all()
-        return [_leave_application_payload(a, len(_get_affected_lectures_for_leave(db, a))) for a in rows]
+    def list_my_leaves():
+        return []
 
     @app.post("/leave/applications/{application_id}/review")
-    def legacy_review_leave_application(
-        application_id: int,
-        payload: LeaveReview,
-        request: Request,
-        admin: models.User = Depends(require_roles(*ADMIN_ROLES)),
-        db: Session = Depends(get_db),
-    ):
-        return review_admin_leave(
-            leave_id=application_id,
-            payload=LeaveReviewRequest(action="approve" if payload.approved else "reject", review_remarks=payload.remarks),
-            request=request,
-            admin=admin,
-            db=db,
-        )
+    def legacy_review_leave():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
     @app.post("/leave/applications/{application_id}/cancel")
-    def legacy_cancel_leave_application(
-        application_id: int,
-        user: models.User = Depends(get_current_user),
-        db: Session = Depends(get_db),
-    ):
-        application = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.id == application_id,
-                models.LeaveApplication.user_id == user.id,
-                models.LeaveApplication.college_id == user.college_id,
-                models.LeaveApplication.status == models.LeaveStatus.PENDING,
-            )
-            .first()
-        )
-        if not application:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pending leave application not found.")
-        application.status = models.LeaveStatus.CANCELLED
-        application.updated_at = _utcnow()
-        db.commit()
-        return {"id": application.id, "status": application.status.value}
+    def legacy_cancel_leave():
+        raise HTTPException(status_code=400, detail="Leave module has been removed.")
 
     # =========================================================================
     # PHASE 10: SUBSTITUTE FACULTY MANAGEMENT & REPLACEMENT WORKFLOWS
@@ -8596,23 +8038,8 @@ def create_app() -> FastAPI:
         active_substitutions = sum(1 for s in all_subs if s.status in ("accepted", "assigned"))
         declined_count = sum(1 for s in all_subs if s.status == "declined")
 
-        # Uncovered lectures across active/approved leaves
-        today = _utcnow().date()
-        approved_leaves = (
-            db.query(models.LeaveApplication)
-            .filter(
-                models.LeaveApplication.college_id == admin.college_id,
-                models.LeaveApplication.status == models.LeaveStatus.APPROVED,
-                models.LeaveApplication.end_date >= today,
-            )
-            .all()
-        )
+        # Uncovered lectures across leaves (leaves deprecated and removed)
         uncovered_count = 0
-        for l in approved_leaves:
-            aff = _get_affected_lectures_for_leave(db, l)
-            for lec in aff:
-                if not lec.get("substitute_faculty_id"):
-                    uncovered_count += 1
 
         return {
             "items": [_substitute_assignment_payload(s) for s in rows],
@@ -8689,21 +8116,8 @@ def create_app() -> FastAPI:
                 et_disp = time_conflict.end_time.strftime('%H:%M') if hasattr(time_conflict.end_time, 'strftime') else str(time_conflict.end_time)[:5]
                 conflict_reason = f"Schedule Conflict: Already teaching '{time_conflict.subject}' at {st_disp}-{et_disp}"
 
-            # 2. Leave Conflict
-            if is_eligible and target_dt:
-                on_leave = (
-                    db.query(models.LeaveApplication)
-                    .filter(
-                        models.LeaveApplication.user_id == fac.id,
-                        models.LeaveApplication.status == models.LeaveStatus.APPROVED,
-                        models.LeaveApplication.start_date <= target_dt,
-                        models.LeaveApplication.end_date >= target_dt,
-                    )
-                    .first()
-                )
-                if on_leave:
-                    is_eligible = False
-                    conflict_reason = f"On Approved Leave until {on_leave.end_date}"
+            # 2. Leave Conflict (Leaves deprecated and removed)
+            on_leave = None
 
             # 3. Availability Blackout Window
             if is_eligible:

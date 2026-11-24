@@ -132,30 +132,7 @@ if not pol:
     db.add(pol)
     db.commit()
 
-# Leave Types
-default_leaves = [
-    ("Casual Leave", "CL", 12, True, False),
-    ("Medical Leave", "ML", 10, True, True),
-    ("Duty Leave", "DL", 15, True, True),
-    ("Earned Leave", "EL", 30, True, False),
-    ("Compensatory Off", "CO", 5, True, False),
-    ("Leave Without Pay", "LWP", 90, False, False),
-]
-for lt_name, lt_code, max_d, paid, doc_req in default_leaves:
-    exist_lt = db.query(models.LeaveType).filter(models.LeaveType.college_id == college.id, models.LeaveType.code == lt_code).first()
-    if not exist_lt:
-        db.add(models.LeaveType(
-            college_id=college.id,
-            name=lt_name,
-            code=lt_code,
-            max_days_per_year=max_d,
-            is_paid=paid,
-            requires_document=doc_req,
-            is_active=True,
-        ))
-db.commit()
-
-# Working Shift
+# Working Shift (Leave modules deprecated and removed)
 shift = db.query(models.WorkingShift).filter(models.WorkingShift.college_id == college.id).first()
 if not shift:
     shift = models.WorkingShift(
