@@ -468,7 +468,7 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
 
       {/* 2-Column Responsive Layout */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '20px', alignItems: 'start' }}>
-        
+
         {/* LEFT COLUMN: Summary Circle Card + 12 Metric Cards */}
         <div style={{ display: 'grid', gap: '16px' }}>
 
@@ -915,7 +915,7 @@ export function FacultyAttendanceTrackerPage({ user }: { user: User }) {
           instruction={challenge.instruction || 'Look directly into camera to verify identity'}
           captureLabel={activePunch.action === 'punch_in' ? 'Confirm Punch In' : 'Confirm Punch Out'}
           consent={true}
-          onConsentChange={() => {}}
+          onConsentChange={() => { }}
           busy={punchBusy}
           onCancel={() => {
             setActivePunch(null)
