@@ -1,23 +1,20 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import {
-  Activity,
   AlertCircle,
   AlertTriangle,
-  BarChart3,
-  Bell,
   BookOpen,
   Building2,
   Calendar,
   CalendarDays,
-  CalendarPlus,
   Check,
   CheckCircle2,
   Clock,
   Clock3,
   Fingerprint,
+  LayoutGrid,
+  LayoutList,
   MapPin,
   RefreshCw,
-  Search,
   ShieldCheck,
   UserCheck,
   X,
@@ -43,8 +40,13 @@ interface TodayStats {
   completed_lectures: number
   upcoming_lectures: number
   missed_lectures: number
-  total_teaching_hours: number
-  monthly_attendance_percentage: number
+  day_name?: string
+  weekly_total_lectures?: number
+  semester_completed_lectures?: number
+  semester_total_lectures?: number
+  semester_progress_pct?: number
+  total_teaching_hours?: number
+  monthly_attendance_percentage?: number
   late_arrivals?: number
   total_scheduled_month?: number
 }
@@ -63,6 +65,8 @@ interface LectureItem {
   end_time: string
   raw_start_time?: string
   raw_end_time?: string
+  estimated_duration?: string
+  duration_minutes?: number
   allowed_punch_in_window: string
   is_substitute: boolean
   status: 'scheduled' | 'upcoming' | 'punch_in_available' | 'in_progress' | 'completed' | 'late' | 'missed' | 'pending_review' | 'cancelled'
@@ -75,15 +79,25 @@ interface LectureItem {
 interface WeeklyDaySchedule {
   day_of_week: number
   day_name: string
+  date?: string
+  formatted_date?: string
+  full_day_label?: string
+  is_today?: boolean
   lectures: Array<{
     id: number
     subject: string
     course_name: string | null
     semester?: number | null
+    division?: string | null
     room: string | null
     start_time: string
     end_time: string
+    estimated_duration?: string
+    duration_minutes?: number
     status: string
+    status_label?: string
+    punch_in_time?: string | null
+    punch_out_time?: string | null
   }>
 }
 
@@ -171,10 +185,11 @@ export function FacultyDashboardPage({ user, navigate }: FacultyDashboardPagePro
 
   // Timetable view filter: 'today' | 'tomorrow' | 'weekly'
   const [timetableTab, setTimetableTab] = useState<'today' | 'tomorrow' | 'weekly'>('today')
-
-  // Recent Attendance filters
-  const [historyStatusFilter, setHistoryStatusFilter] = useState<string>('all')
-  const [historySearch, setHistorySearch] = useState<string>('')
+  const [timetableMode, setTimetableMode] = useState<'cards' | 'table'>('cards')
+  const [selectedWeeklyDay, setSelectedWeeklyDay] = useState<number>(() => {
+    const wd = (new Date().getDay() + 6) % 7
+    return wd < 6 ? wd : 0
+  })
 
   // Modal / Verification state for live Face & GPS Punch
   const [activePunch, setActivePunch] = useState<{
@@ -285,29 +300,20 @@ export function FacultyDashboardPage({ user, navigate }: FacultyDashboardPagePro
 
   const f = data?.faculty
   const stats = data?.today_stats
+  const currentDayName = stats?.day_name || new Date().toLocaleDateString('en-US', { weekday: 'long' })
+  const todayFormattedDate = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+  const tomorrowObj = new Date()
+  tomorrowObj.setDate(tomorrowObj.getDate() + 1)
+  const tomorrowDayName = tomorrowObj.toLocaleDateString('en-US', { weekday: 'long' })
+  const tomorrowFormattedDate = tomorrowObj.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
   const nextLec = data?.next_lecture
   const todayLectures = data?.today_lectures || []
   const tomorrowLectures = data?.tomorrow_lectures || []
   const weeklySchedule = data?.weekly_schedule || []
-  const recentAttendance = data?.recent_attendance || []
-  const analytics = data?.analytics
   const substitutes = data?.pending_substitutes || []
-  const announcements = data?.announcements || []
-
-  // Filtered recent attendance list
-  const filteredRecentAttendance = useMemo(() => {
-    return recentAttendance.filter((rec) => {
-      const matchesStatus = historyStatusFilter === 'all' || rec.status === historyStatusFilter
-      const matchesSearch =
-        !historySearch ||
-        rec.subject.toLowerCase().includes(historySearch.toLowerCase()) ||
-        rec.course_name.toLowerCase().includes(historySearch.toLowerCase())
-      return matchesStatus && matchesSearch
-    })
-  }, [recentAttendance, historyStatusFilter, historySearch])
 
   // Badge renderer for lecture status
-  const renderStatusBadge = (status: LectureItem['status']) => {
+  const renderStatusBadge = (status: string | undefined) => {
     switch (status) {
       case 'completed':
         return <span className="lecture-status-badge status-completed"><CheckCircle2 size={11} /> Completed</span>
@@ -326,6 +332,103 @@ export function FacultyDashboardPage({ user, navigate }: FacultyDashboardPagePro
       default:
         return <span className="lecture-status-badge status-scheduled"><Calendar size={11} /> Scheduled</span>
     }
+  }
+
+  // Spacious, Uncongested Lecture Card Renderer
+  const renderLectureCard = (lec: any, showPunchWindow: boolean = true) => {
+    return (
+      <article
+        key={`${lec.source_type || 'lec'}-${lec.schedule_id || lec.id}`}
+        className={`spacious-lec-card status-${lec.status || 'scheduled'}`}
+      >
+        {/* Left Column: Scheduled Slot & Duration */}
+        <div className="spacious-lec-time-col">
+          <div className="spacious-lec-time">
+            <Clock size={15} className="spacious-lec-time-icon" />
+            <span>{lec.start_time} – {lec.end_time}</span>
+          </div>
+          <div className="spacious-lec-duration-pill">
+            <span>⏱ {lec.estimated_duration || '1 hr'}</span>
+          </div>
+          {showPunchWindow && lec.allowed_punch_in_window && (
+            <div className="spacious-lec-window" title="Allowed punch-in grace window">
+              <span>Window: {lec.allowed_punch_in_window}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Center Column: Subject & Academic Details */}
+        <div className="spacious-lec-main-col">
+          <div className="spacious-lec-title-row">
+            {lec.lecture_number && (
+              <span className="spacious-lec-num">#{lec.lecture_number}</span>
+            )}
+            <h4 className="spacious-lec-subject">{lec.subject}</h4>
+            {lec.is_substitute && (
+              <span className="badge badge-info" style={{ fontSize: '9.5px', padding: '2px 7px' }}>Substitute Assignment</span>
+            )}
+          </div>
+
+          <div className="spacious-lec-tags-row">
+            <span className="spacious-lec-tag">
+              <BookOpen size={13} style={{ color: '#2563eb' }} />
+              <strong>{lec.course_name || 'BCA'}</strong> {lec.semester ? `(Sem ${lec.semester})` : ''}
+            </span>
+
+            <span className="spacious-lec-tag">
+              <MapPin size={13} style={{ color: '#0d9488' }} />
+              <span>Room {lec.room || 'LH-101'}</span>
+            </span>
+
+            {lec.division && (
+              <span className="spacious-lec-tag">
+                <span>Div: {lec.division}</span>
+              </span>
+            )}
+
+            {lec.department && (
+              <span className="spacious-lec-tag">
+                <span>{lec.department}</span>
+              </span>
+            )}
+          </div>
+
+          {(lec.punch_in_time || lec.punch_out_time) && (
+            <div className="spacious-lec-punch-log">
+              <Fingerprint size={13} />
+              <span>In: <strong>{lec.punch_in_time || '—'}</strong></span>
+              <span>•</span>
+              <span>Out: <strong>{lec.punch_out_time || '—'}</strong></span>
+            </div>
+          )}
+        </div>
+
+        {/* Right Column: Status & Direct Action */}
+        <div className="spacious-lec-action-col">
+          <div>
+            {renderStatusBadge(lec.status)}
+          </div>
+
+          {lec.can_punch_in ? (
+            <button
+              type="button"
+              className="button button-primary spacious-punch-btn"
+              onClick={() => initiateLecturePunch(lec, 'punch_in')}
+            >
+              <Fingerprint size={14} /> Punch In Now (Face & GPS)
+            </button>
+          ) : lec.can_punch_out ? (
+            <button
+              type="button"
+              className="button button-secondary spacious-punch-btn punch-btn-out"
+              onClick={() => initiateLecturePunch(lec, 'punch_out')}
+            >
+              <Fingerprint size={14} /> Punch Out (Complete)
+            </button>
+          ) : null}
+        </div>
+      </article>
+    )
   }
 
   if (loading && !data) {
@@ -465,86 +568,91 @@ export function FacultyDashboardPage({ user, navigate }: FacultyDashboardPagePro
         </div>
       )}
 
-      {/* 2. Dashboard Summary Cards (6 Exact Specified Cards - No Honorarium) */}
+      {/* 2. Dashboard Summary Cards (6 Exact Specified Cards) */}
       <div className="user-stat-grid-6">
-        {/* Card 1: Today's Total Lectures */}
+        {/* Card 1: nos of lecs days wise with day name */}
         <article className="user-stat-card stat-lectures">
           <div className="user-stat-card-top">
             <span className="user-stat-icon">
               <CalendarDays size={21} />
             </span>
-            <span className="stat-chip stat-chip-blue">Today</span>
+            <span className="stat-chip stat-chip-blue">{currentDayName}</span>
           </div>
           <strong>{stats?.assigned_lectures ?? 0}</strong>
-          <span className="user-stat-label">Today's Total Lectures</span>
+          <span className="user-stat-label">{currentDayName}'s Total Lectures</span>
           <small>{stats?.completed_lectures ?? 0} done · {stats?.upcoming_lectures ?? 0} remaining</small>
         </article>
 
-        {/* Card 2: Completed Lectures */}
-        <article className="user-stat-card stat-attended">
+        {/* Card 2: total nos of lecs in this week (week wise) */}
+        <article className="user-stat-card stat-status">
           <div className="user-stat-card-top">
-            <span className="user-stat-icon">
-              <CheckCircle2 size={21} />
+            <span className="user-stat-icon" style={{ color: '#2563eb', background: '#eff6ff' }}>
+              <Calendar size={21} />
             </span>
-            <span className="stat-chip stat-chip-green">Verified</span>
+            <span className="stat-chip stat-chip-blue">This Week</span>
           </div>
-          <strong style={{ color: '#16a34a' }}>{stats?.completed_lectures ?? 0}</strong>
-          <span className="user-stat-label">Completed Lectures</span>
-          <small>Punched out successfully</small>
+          <strong style={{ color: '#1d4ed8' }}>
+            {stats?.weekly_total_lectures ?? (weeklySchedule.reduce((acc, d) => acc + d.lectures.length, 0) || (stats?.assigned_lectures ?? 0))}
+          </strong>
+          <span className="user-stat-label">Total Lectures (Week)</span>
+          <small>Mon – Sat weekly scheduled load</small>
         </article>
 
-        {/* Card 3: Upcoming Lectures */}
+        {/* Card 3: pending lecs days wise with day name */}
         <article className="user-stat-card stat-upcoming">
           <div className="user-stat-card-top">
             <span className="user-stat-icon">
               <Clock3 size={21} />
             </span>
-            <span className="stat-chip stat-chip-purple">Pending</span>
+            <span className="stat-chip stat-chip-purple">{currentDayName} · Pending</span>
           </div>
           <strong style={{ color: '#7c3aed' }}>{stats?.upcoming_lectures ?? 0}</strong>
-          <span className="user-stat-label">Upcoming Lectures</span>
+          <span className="user-stat-label">{currentDayName}'s Pending Lectures</span>
           <small>Awaiting punch-in window</small>
         </article>
 
-        {/* Card 4: Missed Lectures */}
+        {/* Card 4: missed lecs days wise with day name */}
         <article className="user-stat-card stat-hours">
           <div className="user-stat-card-top">
             <span className="user-stat-icon" style={{ color: '#dc2626', background: '#fee2e2' }}>
               <AlertCircle size={21} />
             </span>
-            <span className="stat-chip stat-chip-red">Alert</span>
+            <span className="stat-chip stat-chip-red">{currentDayName} · Alert</span>
           </div>
           <strong style={{ color: '#dc2626' }}>{stats?.missed_lectures ?? 0}</strong>
-          <span className="user-stat-label">Missed Lectures</span>
+          <span className="user-stat-label">{currentDayName}'s Missed Lectures</span>
           <small>Window elapsed without punch</small>
         </article>
 
-        {/* Card 5: Total Teaching Hours */}
-        <article className="user-stat-card stat-status">
+        {/* Card 5: completed lecs days wise with day name */}
+        <article className="user-stat-card stat-attended">
           <div className="user-stat-card-top">
-            <span className="user-stat-icon" style={{ color: '#d97706', background: '#fef3c7' }}>
-              <Clock size={21} />
+            <span className="user-stat-icon">
+              <CheckCircle2 size={21} />
             </span>
-            <span className="stat-chip stat-chip-amber">Taught</span>
+            <span className="stat-chip stat-chip-green">{currentDayName} · Verified</span>
           </div>
-          <strong>
-            {stats?.total_teaching_hours ?? 0} <span style={{ fontSize: '13px', fontWeight: 600, color: '#64748b' }}>hrs</span>
-          </strong>
-          <span className="user-stat-label">Total Teaching Hours</span>
-          <small>Verified monthly duration</small>
+          <strong style={{ color: '#16a34a' }}>{stats?.completed_lectures ?? 0}</strong>
+          <span className="user-stat-label">{currentDayName}'s Completed Lectures</span>
+          <small>Punched out successfully</small>
         </article>
 
-        {/* Card 6: Monthly Attendance Percentage */}
+        {/* Card 6: lecs taken / total nos of lec in this sem */}
         <article className="user-stat-card stat-attended">
           <div className="user-stat-card-top">
             <span className="user-stat-icon" style={{ color: '#0d9488', background: '#ccfbf1' }}>
-              <Activity size={21} />
+              <BookOpen size={21} />
             </span>
-            <span className="stat-chip stat-chip-teal">Month Rate</span>
+            <span className="stat-chip stat-chip-teal">This Semester</span>
           </div>
-          <strong style={{ color: '#0d9488' }}>{stats?.monthly_attendance_percentage ?? 100}%</strong>
-          <span className="user-stat-label">Monthly Attendance</span>
-          <small>Delivery adherence rate</small>
+          <strong style={{ color: '#0d9488', fontSize: '20px' }}>
+            {stats?.semester_completed_lectures ?? stats?.completed_lectures ?? 0}
+            <span style={{ fontSize: '15px', color: '#64748b', fontWeight: 600 }}> / {stats?.semester_total_lectures ?? 60}</span>
+          </strong>
+          <span className="user-stat-label">Semester Lectures Progress</span>
+          <small>
+            {stats?.semester_progress_pct ?? Math.round(((stats?.semester_completed_lectures ?? 0) / (stats?.semester_total_lectures ?? 60)) * 100)}% taken of semester quota
+          </small>
         </article>
       </div>
 
@@ -622,501 +730,338 @@ export function FacultyDashboardPage({ user, navigate }: FacultyDashboardPagePro
 
       {/* 3. Core Section: Assigned Timetable with Filters (Today, Tomorrow, Weekly Schedule) */}
       <section className="panel" style={{ marginBottom: '16px' }}>
-        <div className="panel-heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '14px' }}>
+        <div className="panel-heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px', marginBottom: '16px' }}>
           <div>
-            <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0, fontSize: '15px', color: '#1e293b' }}>
+            <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0, fontSize: '16px', color: '#1e293b' }}>
               <CalendarDays size={18} style={{ color: '#2563eb' }} />
-              Assigned Teaching Timetable & Punch-In Ledger
+              My Timetable & Lecture Schedule
             </h3>
-            <p className="muted" style={{ margin: '3px 0 0', fontSize: '11px', color: '#64748b' }}>
-              Independent lecture-wise punch-in and punch-out strictly enforced per schedule
+            <p className="muted" style={{ margin: '3px 0 0', fontSize: '11.5px', color: '#64748b' }}>
+              Individual lecture delivery schedule with permitted punch-in window, classroom assignment, and live status
             </p>
           </div>
 
-          {/* Timetable Tab Switcher */}
-          <div className="faculty-timetable-tabs">
-            <button
-              type="button"
-              className={`faculty-tab-button ${timetableTab === 'today' ? 'active' : ''}`}
-              onClick={() => setTimetableTab('today')}
-            >
-              Today ({todayLectures.length})
-            </button>
-            <button
-              type="button"
-              className={`faculty-tab-button ${timetableTab === 'tomorrow' ? 'active' : ''}`}
-              onClick={() => setTimetableTab('tomorrow')}
-            >
-              Tomorrow ({tomorrowLectures.length})
-            </button>
-            <button
-              type="button"
-              className={`faculty-tab-button ${timetableTab === 'weekly' ? 'active' : ''}`}
-              onClick={() => setTimetableTab('weekly')}
-            >
-              Weekly Schedule
-            </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            {/* Timetable Tab Switcher */}
+            <div className="faculty-timetable-tabs">
+              <button
+                type="button"
+                className={`faculty-tab-button ${timetableTab === 'today' ? 'active' : ''}`}
+                onClick={() => setTimetableTab('today')}
+              >
+                Today ({todayLectures.length})
+              </button>
+              <button
+                type="button"
+                className={`faculty-tab-button ${timetableTab === 'tomorrow' ? 'active' : ''}`}
+                onClick={() => setTimetableTab('tomorrow')}
+              >
+                Tomorrow ({tomorrowLectures.length})
+              </button>
+              <button
+                type="button"
+                className={`faculty-tab-button ${timetableTab === 'weekly' ? 'active' : ''}`}
+                onClick={() => setTimetableTab('weekly')}
+              >
+                Weekly Schedule
+              </button>
+            </div>
+
+            {/* View Mode Toggle: Cards vs Table */}
+            {timetableTab !== 'weekly' && (
+              <div style={{ display: 'flex', alignItems: 'center', background: '#f1f5f9', padding: '3px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                <button
+                  type="button"
+                  style={{
+                    padding: '5px 9px',
+                    border: 0,
+                    borderRadius: '6px',
+                    background: timetableMode === 'cards' ? '#fff' : 'transparent',
+                    color: timetableMode === 'cards' ? '#2563eb' : '#64748b',
+                    boxShadow: timetableMode === 'cards' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                  }}
+                  onClick={() => setTimetableMode('cards')}
+                  title="Detailed Cards View"
+                >
+                  <LayoutGrid size={13} />
+                  <span>Cards</span>
+                </button>
+                <button
+                  type="button"
+                  style={{
+                    padding: '5px 9px',
+                    border: 0,
+                    borderRadius: '6px',
+                    background: timetableMode === 'table' ? '#fff' : 'transparent',
+                    color: timetableMode === 'table' ? '#2563eb' : '#64748b',
+                    boxShadow: timetableMode === 'table' ? '0 1px 3px rgba(0,0,0,0.1)' : 'none',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                  }}
+                  onClick={() => setTimetableMode('table')}
+                  title="Table View"
+                >
+                  <LayoutList size={13} />
+                  <span>Table</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* View 1: Today's Schedule Table */}
+        {/* ========================================================
+            VIEW 1: TODAY'S SCHEDULE
+            ======================================================== */}
         {timetableTab === 'today' && (
-          <div className="table-scroll">
-            {todayLectures.length === 0 ? (
-              <div className="dashboard-empty" style={{ padding: '40px 20px' }}>
-                <Calendar size={32} style={{ color: '#94a3b8' }} />
-                <strong style={{ color: '#475569', fontSize: '13px' }}>No lectures scheduled for today</strong>
-                <span style={{ color: '#94a3b8', fontSize: '11px' }}>Enjoy your day or review your weekly schedule.</span>
-              </div>
-            ) : (
-              <table className="faculty-timetable-table">
-                <thead>
-                  <tr>
-                    <th>Lec #</th>
-                    <th>Subject Name</th>
-                    <th>Course / Sem</th>
-                    <th>Division</th>
-                    <th>Classroom</th>
-                    <th>Time</th>
-                    <th>Punch-In Window</th>
-                    <th>Punch-In</th>
-                    <th>Punch-Out</th>
-                    <th>Status</th>
-                    <th style={{ textAlign: 'right' }}>Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {todayLectures.map((lec) => (
-                    <tr key={`${lec.source_type}-${lec.schedule_id}`}>
-                      <td style={{ fontWeight: 700, fontFamily: 'monospace' }}>#{lec.lecture_number}</td>
-                      <td>
-                        <strong style={{ display: 'block', color: '#0f172a', fontSize: '12px' }}>{lec.subject}</strong>
-                        {lec.is_substitute && (
-                          <span className="badge badge-info" style={{ fontSize: '9px', marginTop: '2px', display: 'inline-block' }}>Substitute</span>
-                        )}
-                      </td>
-                      <td>{lec.course_name || 'BCA'} {lec.semester ? `(Sem ${lec.semester})` : ''}</td>
-                      <td>{lec.division || 'Sec A'}</td>
-                      <td>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
-                          <MapPin size={12} style={{ color: '#94a3b8' }} /> Room {lec.room || '—'}
-                        </span>
-                      </td>
-                      <td style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{lec.start_time} – {lec.end_time}</td>
-                      <td style={{ fontFamily: 'monospace', fontSize: '10.5px', color: '#64748b' }}>{lec.allowed_punch_in_window}</td>
-                      <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#16a34a' }}>{lec.punch_in_time || '—'}</td>
-                      <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#2563eb' }}>{lec.punch_out_time || '—'}</td>
-                      <td>{renderStatusBadge(lec.status)}</td>
-                      <td style={{ textAlign: 'right' }}>
-                        {lec.can_punch_in ? (
-                          <button
-                            type="button"
-                            className="button button-primary button-sm"
-                            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
-                            onClick={() => initiateLecturePunch(lec, 'punch_in')}
-                          >
-                            <Fingerprint size={13} /> Punch In
-                          </button>
-                        ) : lec.can_punch_out ? (
-                          <button
-                            type="button"
-                            className="button button-secondary button-sm"
-                            style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', borderColor: '#f59e0b', color: '#b45309' }}
-                            onClick={() => initiateLecturePunch(lec, 'punch_out')}
-                          >
-                            <Fingerprint size={13} /> Punch Out
-                          </button>
-                        ) : lec.status === 'completed' ? (
-                          <span style={{ color: '#16a34a', fontWeight: 600, fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                            <CheckCircle2 size={13} /> Logged
-                          </span>
-                        ) : lec.status === 'missed' ? (
-                          <span style={{ color: '#dc2626', fontWeight: 600, fontSize: '11px' }}>Closed</span>
-                        ) : (
-                          <span style={{ color: '#94a3b8', fontSize: '11px' }}>Awaiting</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {/* View 2: Tomorrow's Schedule Table */}
-        {timetableTab === 'tomorrow' && (
-          <div className="table-scroll">
-            {tomorrowLectures.length === 0 ? (
-              <div className="dashboard-empty" style={{ padding: '40px 20px' }}>
-                <Calendar size={32} style={{ color: '#94a3b8' }} />
-                <strong style={{ color: '#475569', fontSize: '13px' }}>No lectures scheduled for tomorrow</strong>
-                <span style={{ color: '#94a3b8', fontSize: '11px' }}>Check the full weekly schedule for your upcoming sessions.</span>
-              </div>
-            ) : (
-              <table className="faculty-timetable-table">
-                <thead>
-                  <tr>
-                    <th>Lec #</th>
-                    <th>Subject Name</th>
-                    <th>Course / Sem</th>
-                    <th>Division</th>
-                    <th>Classroom</th>
-                    <th>Time</th>
-                    <th>Allowed Punch-In Window</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tomorrowLectures.map((lec) => (
-                    <tr key={`${lec.source_type}-${lec.schedule_id}`}>
-                      <td style={{ fontWeight: 700, fontFamily: 'monospace' }}>#{lec.lecture_number}</td>
-                      <td><strong style={{ color: '#0f172a' }}>{lec.subject}</strong></td>
-                      <td>{lec.course_name || 'BCA'} {lec.semester ? `(Sem ${lec.semester})` : ''}</td>
-                      <td>{lec.division || 'Sec A'}</td>
-                      <td>
-                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
-                          <MapPin size={12} style={{ color: '#94a3b8' }} /> Room {lec.room || '—'}
-                        </span>
-                      </td>
-                      <td style={{ fontWeight: 600 }}>{lec.start_time} – {lec.end_time}</td>
-                      <td style={{ fontFamily: 'monospace', fontSize: '10.5px', color: '#64748b' }}>{lec.allowed_punch_in_window}</td>
-                      <td>{renderStatusBadge(lec.status)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        )}
-
-        {/* View 3: Full Weekly Schedule Preview (Monday to Saturday) */}
-        {timetableTab === 'weekly' && (
-          <div style={{ padding: '12px 0' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: '12px' }}>
-              {weeklySchedule.map((day) => (
-                <div key={day.day_of_week} style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '12px', background: '#f8fafc' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px', marginBottom: '8px' }}>
-                    <strong style={{ fontSize: '13px', color: '#1e293b' }}>{day.day_name}</strong>
-                    <span style={{ fontSize: '10px', fontWeight: 700, background: '#fff', padding: '2px 8px', borderRadius: '6px', border: '1px solid #e2e8f0', color: '#64748b' }}>
-                      {day.lectures.length} lecture{day.lectures.length === 1 ? '' : 's'}
-                    </span>
-                  </div>
-
-                  {day.lectures.length === 0 ? (
-                    <div style={{ textAlign: 'center', padding: '20px 0', color: '#94a3b8', fontSize: '11px' }}>No scheduled lectures</div>
-                  ) : (
-                    <div style={{ display: 'grid', gap: '8px' }}>
-                      {day.lectures.map((l) => (
-                        <div key={l.id} style={{ padding: '9px 10px', background: '#fff', borderRadius: '7px', border: '1px solid #e2e8f0', fontSize: '11.5px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 700, color: '#0f172a' }}>
-                            <span>{l.subject}</span>
-                            <span style={{ color: '#2563eb', fontFamily: 'monospace', fontSize: '10.5px' }}>{l.start_time} – {l.end_time}</span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', color: '#64748b', fontSize: '10.5px', marginTop: '4px' }}>
-                            <span>{l.course_name} {l.semester ? `· Sem ${l.semester}` : ''}</span>
-                            <span style={{ fontFamily: 'monospace' }}>Room {l.room || '—'}</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </section>
-
-      {/* 4. Recent Attendance Activity & Analytics Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px', marginBottom: '16px' }}>
-        {/* Recent Attendance Activity Table */}
-        <section className="panel" style={{ flex: '1 1 500px' }}>
-          <div className="panel-heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px', marginBottom: '12px' }}>
-            <div>
-              <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0, fontSize: '14px', color: '#1e293b' }}>
-                <Activity size={17} style={{ color: '#4f46e5' }} />
-                Recent Attendance Activity
-              </h3>
-              <p className="muted" style={{ margin: '2px 0 0', fontSize: '11px' }}>
-                Verified punch ledger with biometric & GPS compliance
-              </p>
-            </div>
-
-            {/* Filters */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div style={{ position: 'relative' }}>
-                <Search size={13} style={{ position: 'absolute', left: '8px', top: '8px', color: '#94a3b8' }} />
-                <input
-                  type="text"
-                  placeholder="Filter subject..."
-                  style={{ padding: '5px 8px 5px 26px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '11px', width: '130px' }}
-                  value={historySearch}
-                  onChange={(e) => setHistorySearch(e.target.value)}
-                />
-              </div>
-              <select
-                style={{ padding: '5px 8px', borderRadius: '6px', border: '1px solid #cbd5e1', fontSize: '11px', background: '#fff', color: '#334155' }}
-                value={historyStatusFilter}
-                onChange={(e) => setHistoryStatusFilter(e.target.value)}
-              >
-                <option value="all">All</option>
-                <option value="completed">Completed</option>
-                <option value="pending_review">Pending Review</option>
-                <option value="missed">Missed</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="table-scroll">
-            {filteredRecentAttendance.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '30px', color: '#94a3b8', fontSize: '12px' }}>
-                No recent attendance records matching filters.
-              </div>
-            ) : (
-              <table className="faculty-timetable-table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Subject</th>
-                    <th>Scheduled</th>
-                    <th>Punch In</th>
-                    <th>Punch Out</th>
-                    <th>Duration</th>
-                    <th>Verification</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredRecentAttendance.slice(0, 6).map((r) => (
-                    <tr key={r.id}>
-                      <td style={{ fontWeight: 600, color: '#0f172a' }}>{r.formatted_date}</td>
-                      <td>
-                        <strong>{r.subject}</strong>
-                        <div style={{ fontSize: '10px', color: '#64748b' }}>{r.course_name}</div>
-                      </td>
-                      <td style={{ fontFamily: 'monospace', fontSize: '10.5px' }}>{r.scheduled_time}</td>
-                      <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#16a34a' }}>{r.punch_in_time}</td>
-                      <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#2563eb' }}>{r.punch_out_time}</td>
-                      <td>{r.duration_formatted}</td>
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px' }}>
-                          <span style={{ padding: '2px 5px', borderRadius: '4px', background: '#dcfce7', color: '#166534', fontWeight: 700 }}>Face</span>
-                          <span style={{ padding: '2px 5px', borderRadius: '4px', background: '#dbeafe', color: '#1e40af', fontWeight: 700 }}>GPS</span>
-                        </div>
-                      </td>
-                      <td>{renderStatusBadge(r.status as LectureItem['status'])}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </section>
-
-        {/* Attendance Analytics & Trend Visualizer */}
-        <section className="panel" style={{ flex: '1 1 300px' }}>
-          <div className="panel-heading" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-            <div>
-              <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: 0, fontSize: '14px', color: '#1e293b' }}>
-                <BarChart3 size={17} style={{ color: '#0d9488' }} />
-                Monthly Attendance Analytics
-              </h3>
-              <p className="muted" style={{ margin: '2px 0 0', fontSize: '11px' }}>Verified lecture delivery metrics</p>
-            </div>
-            <span style={{ fontSize: '11px', fontWeight: 700, padding: '3px 8px', borderRadius: '6px', background: '#ccfbf1', color: '#0f766e' }}>
-              {analytics?.monthly_attendance_percentage ?? 100}% Rate
-            </span>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px', marginBottom: '12px' }}>
-            <div style={{ padding: '10px', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-              <div style={{ fontSize: '11px', color: '#64748b' }}>Scheduled Sessions</div>
-              <div style={{ fontSize: '18px', fontWeight: 800, color: '#0f172a', marginTop: '2px' }}>
-                {analytics?.total_scheduled_lectures ?? stats?.assigned_lectures ?? 0}
-              </div>
-            </div>
-            <div style={{ padding: '10px', borderRadius: '8px', background: '#dcfce7', border: '1px solid #bbf7d0' }}>
-              <div style={{ fontSize: '11px', color: '#166534', fontWeight: 600 }}>Completed Sessions</div>
-              <div style={{ fontSize: '18px', fontWeight: 800, color: '#15803d', marginTop: '2px' }}>
-                {analytics?.completed_lectures ?? stats?.completed_lectures ?? 0}
-              </div>
-            </div>
-            <div style={{ padding: '10px', borderRadius: '8px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-              <div style={{ fontSize: '11px', color: '#64748b' }}>Teaching Hours</div>
-              <div style={{ fontSize: '18px', fontWeight: 800, color: '#0f172a', marginTop: '2px' }}>
-                {analytics?.total_teaching_hours ?? stats?.total_teaching_hours ?? 0} hrs
-              </div>
-            </div>
-            <div style={{ padding: '10px', borderRadius: '8px', background: '#fef3c7', border: '1px solid #fde68a' }}>
-              <div style={{ fontSize: '11px', color: '#b45309', fontWeight: 600 }}>Late Arrivals</div>
-              <div style={{ fontSize: '18px', fontWeight: 800, color: '#b45309', marginTop: '2px' }}>
-                {analytics?.late_arrivals ?? 0}
-              </div>
-            </div>
-          </div>
-
-          {/* 7-Day Trend Chart */}
           <div>
-            <div style={{ fontSize: '11px', fontWeight: 700, color: '#475569', marginBottom: '4px' }}>Past 7 Days Delivery Trend</div>
-            <div className="trend-bars-container">
-              {(analytics?.daily_trends || []).map((day, idx) => {
-                const heightPct = Math.min(100, Math.max(16, day.completed * 35))
-                return (
-                  <div key={idx} className="trend-bar-column">
-                    <span style={{ fontSize: '9px', fontWeight: 700, color: '#475569' }}>{day.completed}</span>
-                    <div style={{ height: `${heightPct}%` }} className="trend-bar-fill" />
-                    <span style={{ fontSize: '9px', color: '#64748b', fontWeight: 600 }}>{day.day_name}</span>
-                  </div>
-                )
-              })}
+            <div style={{ marginBottom: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#eff6ff', border: '1px solid #bfdbfe', padding: '10px 14px', borderRadius: '10px', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Calendar size={16} style={{ color: '#2563eb' }} />
+                <span style={{ fontSize: '13px', color: '#1e3a8a', fontWeight: 700 }}>
+                  Today: {currentDayName}, {todayFormattedDate}
+                </span>
+              </div>
+              <span style={{ fontSize: '11px', fontWeight: 700, color: '#1d4ed8', background: '#dbeafe', padding: '3px 9px', borderRadius: '6px' }}>
+                {todayLectures.length} lecture{todayLectures.length === 1 ? '' : 's'} assigned
+              </span>
             </div>
-          </div>
 
-          <div style={{ marginTop: '12px' }}>
-            <button
-              type="button"
-              className="button button-secondary"
-              style={{ width: '100%', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}
-              onClick={() => navigate('reports')}
-            >
-              <BarChart3 size={13} /> View Detailed Reports
-            </button>
+            {todayLectures.length === 0 ? (
+              <div className="dashboard-empty" style={{ padding: '48px 20px', background: '#f8fafc', borderRadius: '12px', border: '1px dashed #cbd5e1' }}>
+                <Calendar size={36} style={{ color: '#94a3b8', marginBottom: '6px' }} />
+                <strong style={{ color: '#334155', fontSize: '14px' }}>No lectures scheduled for today ({currentDayName}, {todayFormattedDate})</strong>
+                <span style={{ color: '#64748b', fontSize: '11.5px', marginTop: '3px' }}>Enjoy your day off or review your weekly schedule.</span>
+              </div>
+            ) : timetableMode === 'cards' ? (
+              /* Spacious, Uncongested Cards Mode for Today */
+              <div className="spacious-timetable-container">
+                {todayLectures.map((lec) => renderLectureCard(lec, true))}
+              </div>
+            ) : (
+              /* Table View for Today */
+              <div className="table-scroll">
+                <table className="faculty-timetable-table">
+                  <thead>
+                    <tr>
+                      <th>Lec #</th>
+                      <th>Subject Name & Code</th>
+                      <th>Course / Sem</th>
+                      <th>Division</th>
+                      <th>Classroom</th>
+                      <th>Scheduled Slot</th>
+                      <th>Duration</th>
+                      <th>Allowed Punch Window</th>
+                      <th>Punch In</th>
+                      <th>Punch Out</th>
+                      <th>Status</th>
+                      <th style={{ textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {todayLectures.map((lec) => (
+                      <tr key={`${lec.source_type}-${lec.schedule_id}`}>
+                        <td style={{ fontWeight: 800, fontFamily: 'monospace', color: '#1e3a8a' }}>#{lec.lecture_number}</td>
+                        <td>
+                          <strong style={{ display: 'block', color: '#0f172a', fontSize: '12.5px' }}>{lec.subject}</strong>
+                          {lec.is_substitute && (
+                            <span className="badge badge-info" style={{ fontSize: '9px', marginTop: '2px', display: 'inline-block' }}>Substitute</span>
+                          )}
+                        </td>
+                        <td>{lec.course_name || 'BCA'} {lec.semester ? `(Sem ${lec.semester})` : ''}</td>
+                        <td><span style={{ fontWeight: 600 }}>{lec.division || 'Sec A'}</span></td>
+                        <td>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 700 }}>
+                            <MapPin size={12} style={{ color: '#0d9488' }} /> Room {lec.room || '—'}
+                          </span>
+                        </td>
+                        <td style={{ fontWeight: 700, color: '#1e3a8a', whiteSpace: 'nowrap' }}>{lec.start_time} – {lec.end_time}</td>
+                        <td>
+                          <span style={{ fontSize: '11px', fontWeight: 700, color: '#0369a1', background: '#e0f2fe', padding: '2px 6px', borderRadius: '4px' }}>
+                            ⏱ {lec.estimated_duration || '1 hr'}
+                          </span>
+                        </td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '11px', color: '#64748b' }}>{lec.allowed_punch_in_window}</td>
+                        <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#16a34a' }}>{lec.punch_in_time || '—'}</td>
+                        <td style={{ fontFamily: 'monospace', fontWeight: 700, color: '#2563eb' }}>{lec.punch_out_time || '—'}</td>
+                        <td>{renderStatusBadge(lec.status)}</td>
+                        <td style={{ textAlign: 'right' }}>
+                          {lec.can_punch_in ? (
+                            <button
+                              type="button"
+                              className="button button-primary button-sm"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                              onClick={() => initiateLecturePunch(lec, 'punch_in')}
+                            >
+                              <Fingerprint size={13} /> Punch In
+                            </button>
+                          ) : lec.can_punch_out ? (
+                            <button
+                              type="button"
+                              className="button button-secondary button-sm"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', borderColor: '#f59e0b', color: '#b45309' }}
+                              onClick={() => initiateLecturePunch(lec, 'punch_out')}
+                            >
+                              <Fingerprint size={13} /> Punch Out
+                            </button>
+                          ) : lec.status === 'completed' ? (
+                            <span style={{ color: '#16a34a', fontWeight: 700, fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <CheckCircle2 size={13} /> Logged
+                            </span>
+                          ) : lec.status === 'missed' ? (
+                            <span style={{ color: '#dc2626', fontWeight: 700, fontSize: '11px' }}>Closed</span>
+                          ) : (
+                            <span style={{ color: '#94a3b8', fontSize: '11px' }}>Awaiting</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        </section>
-      </div>
+        )}
 
-      {/* 5. Institutional Announcements & Quick Self-Service Actions */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '16px' }}>
-        {/* Campus Notice Board */}
-        <section className="panel">
-          <div className="panel-heading" style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px' }}>
-            <Bell size={18} style={{ color: '#2563eb' }} />
+        {/* ========================================================
+            VIEW 2: TOMORROW'S SCHEDULE
+            ======================================================== */}
+        {timetableTab === 'tomorrow' && (
+          <div>
+            <div style={{ marginBottom: '14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: '#f8fafc', border: '1px solid #e2e8f0', padding: '10px 14px', borderRadius: '10px', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Calendar size={16} style={{ color: '#2563eb' }} />
+                <span style={{ fontSize: '13px', color: '#0f172a', fontWeight: 700 }}>
+                  Tomorrow: {tomorrowDayName}, {tomorrowFormattedDate}
+                </span>
+              </div>
+              <span style={{ fontSize: '11px', fontWeight: 700, color: '#475569', background: '#f1f5f9', padding: '3px 9px', borderRadius: '6px' }}>
+                {tomorrowLectures.length} lecture{tomorrowLectures.length === 1 ? '' : 's'} scheduled
+              </span>
+            </div>
+
+            {tomorrowLectures.length === 0 ? (
+              <div className="dashboard-empty" style={{ padding: '48px 20px', background: '#f8fafc', borderRadius: '12px', border: '1px dashed #cbd5e1' }}>
+                <Calendar size={36} style={{ color: '#94a3b8', marginBottom: '6px' }} />
+                <strong style={{ color: '#334155', fontSize: '14px' }}>No lectures scheduled for tomorrow ({tomorrowDayName}, {tomorrowFormattedDate})</strong>
+                <span style={{ color: '#64748b', fontSize: '11.5px', marginTop: '3px' }}>Check the full weekly schedule for your upcoming sessions.</span>
+              </div>
+            ) : timetableMode === 'cards' ? (
+              /* Spacious, Uncongested Cards Mode for Tomorrow */
+              <div className="spacious-timetable-container">
+                {tomorrowLectures.map((lec) => renderLectureCard(lec, true))}
+              </div>
+            ) : (
+              /* Table View for Tomorrow */
+              <div className="table-scroll">
+                <table className="faculty-timetable-table">
+                  <thead>
+                    <tr>
+                      <th>Lec #</th>
+                      <th>Subject Name</th>
+                      <th>Course / Sem</th>
+                      <th>Division</th>
+                      <th>Classroom</th>
+                      <th>Scheduled Slot</th>
+                      <th>Duration</th>
+                      <th>Allowed Punch-In Window</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tomorrowLectures.map((lec) => (
+                      <tr key={`${lec.source_type}-${lec.schedule_id}`}>
+                        <td style={{ fontWeight: 800, fontFamily: 'monospace', color: '#1e3a8a' }}>#{lec.lecture_number}</td>
+                        <td><strong style={{ color: '#0f172a', fontSize: '12.5px' }}>{lec.subject}</strong></td>
+                        <td>{lec.course_name || 'BCA'} {lec.semester ? `(Sem ${lec.semester})` : ''}</td>
+                        <td><span style={{ fontWeight: 600 }}>{lec.division || 'Sec A'}</span></td>
+                        <td>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontWeight: 700 }}>
+                            <MapPin size={12} style={{ color: '#0d9488' }} /> Room {lec.room || '—'}
+                          </span>
+                        </td>
+                        <td style={{ fontWeight: 700, color: '#1e3a8a' }}>{lec.start_time} – {lec.end_time}</td>
+                        <td>
+                          <span style={{ fontSize: '11px', fontWeight: 700, color: '#0369a1', background: '#e0f2fe', padding: '2px 6px', borderRadius: '4px' }}>
+                            ⏱ {lec.estimated_duration || '1 hr'}
+                          </span>
+                        </td>
+                        <td style={{ fontFamily: 'monospace', fontSize: '11px', color: '#64748b' }}>{lec.allowed_punch_in_window}</td>
+                        <td>{renderStatusBadge(lec.status)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========================================================
+            VIEW 3: FULL WEEKLY SCHEDULE PREVIEW (Monday to Saturday)
+            ======================================================== */}
+        {timetableTab === 'weekly' && (() => {
+          const currentSelectedDay = weeklySchedule.find((d) => d.day_of_week === selectedWeeklyDay) || weeklySchedule[0]
+
+          return (
             <div>
-              <h3 style={{ margin: 0, fontSize: '14px', color: '#1e293b' }}>Campus Notice Board</h3>
-              <p className="muted" style={{ margin: '2px 0 0', fontSize: '11px' }}>Official institutional circulars & notifications</p>
-            </div>
-          </div>
+              {/* Day-Wise Selector Pills (Mon - Sat) */}
+              <div className="spacious-day-pills-bar">
+                {weeklySchedule.map((d) => (
+                  <button
+                    key={d.day_of_week}
+                    type="button"
+                    className={`spacious-day-pill ${selectedWeeklyDay === d.day_of_week ? 'active' : ''}`}
+                    onClick={() => setSelectedWeeklyDay(d.day_of_week)}
+                  >
+                    {d.is_today && <span className="spacious-day-pill-today-dot" title="Today" />}
+                    <span>{d.day_name.slice(0, 3)} {d.formatted_date ? d.formatted_date.split(',')[0].replace(/^[A-Za-z]+\s*/, '') : ''}</span>
+                    <span className="spacious-day-pill-count">{d.lectures.length}</span>
+                  </button>
+                ))}
+              </div>
 
-          {announcements.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '24px', color: '#94a3b8', fontSize: '12px' }}>No active notices at this time.</div>
-          ) : (
-            <div style={{ display: 'grid', gap: '8px' }}>
-              {announcements.map((ann) => (
-                <div
-                  key={ann.id}
-                  style={{
-                    padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #e2e8f0',
-                    background: ann.priority === 'critical' || ann.priority === 'high' ? '#fee2e2' : '#f8fafc',
-                    color: ann.priority === 'critical' || ann.priority === 'high' ? '#991b1b' : '#1e293b',
-                    fontSize: '11.5px',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontWeight: 700, marginBottom: '2px' }}>
-                    <span>{ann.title}</span>
-                    <span style={{ fontSize: '10px', fontWeight: 400, opacity: 0.7 }}>
-                      {ann.created_at ? new Date(ann.created_at).toLocaleDateString() : ''}
-                    </span>
-                  </div>
-                  <p style={{ margin: 0, fontSize: '11px', opacity: 0.9 }}>{ann.message}</p>
+              {/* Selected Day Spacious Uncongested Schedule */}
+              {currentSelectedDay && (
+                <div style={{ marginTop: '10px' }}>
+                  <section key={currentSelectedDay.day_of_week} className="spacious-day-section">
+                    <div className="spacious-day-header">
+                      <div className="spacious-day-header-left">
+                        <Calendar size={15} style={{ color: currentSelectedDay.is_today ? '#2563eb' : '#64748b' }} />
+                        <span className="spacious-day-header-title">{currentSelectedDay.day_name}</span>
+                        <span className="spacious-day-header-date">{currentSelectedDay.formatted_date || currentSelectedDay.date}</span>
+                        {currentSelectedDay.is_today && <span className="spacious-day-today-tag">TODAY</span>}
+                      </div>
+                      <span className="spacious-day-lec-count">
+                        {currentSelectedDay.lectures.length} lecture{currentSelectedDay.lectures.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+
+                    {currentSelectedDay.lectures.length === 0 ? (
+                      <div style={{ textAlign: 'center', padding: '24px 0', color: '#64748b', fontSize: '13px', background: '#f8fafc', borderRadius: '10px', border: '1px dashed #cbd5e1', margin: '4px 0 8px' }}>
+                        No lectures scheduled for {currentSelectedDay.day_name} ({currentSelectedDay.formatted_date})
+                      </div>
+                    ) : (
+                      <div className="spacious-timetable-container" style={{ marginBottom: '8px' }}>
+                        {currentSelectedDay.lectures.map((l) => renderLectureCard(l, false))}
+                      </div>
+                    )}
+                  </section>
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </section>
-
-        {/* Quick Self-Service Actions */}
-        <section className="panel">
-          <div className="panel-heading" style={{ marginBottom: '12px' }}>
-            <h3 style={{ margin: 0, fontSize: '14px', color: '#1e293b' }}>Quick Self-Service Actions</h3>
-            <p className="muted" style={{ margin: '2px 0 0', fontSize: '11px' }}>Visiting faculty shortcuts</p>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
-            <button
-              type="button"
-              style={{
-                padding: '12px',
-                border: '1px solid #e2e8f0',
-                borderRadius: '8px',
-                background: '#fff',
-                textAlign: 'left',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '3px',
-                cursor: 'pointer',
-              }}
-              onClick={() => navigate('timetable')}
-            >
-              <CalendarDays size={18} style={{ color: '#2563eb' }} />
-              <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>My Timetable</strong>
-              <span style={{ fontSize: '10.5px', color: '#64748b' }}>Full weekly schedule</span>
-            </button>
-
-            <button
-              type="button"
-              style={{
-                padding: '12px',
-                border: '1px solid #e2e8f0',
-                borderRadius: '8px',
-                background: '#fff',
-                textAlign: 'left',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '3px',
-                cursor: 'pointer',
-              }}
-              onClick={() => navigate('attendance_tracker')}
-            >
-              <Clock3 size={18} style={{ color: '#16a34a' }} />
-              <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>Mark Attendance</strong>
-              <span style={{ fontSize: '10.5px', color: '#64748b' }}>Face & GPS punch</span>
-            </button>
-
-            <button
-              type="button"
-              style={{
-                padding: '12px',
-                border: '1px solid #e2e8f0',
-                borderRadius: '8px',
-                background: '#fff',
-                textAlign: 'left',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '3px',
-                cursor: 'pointer',
-              }}
-              onClick={() => navigate('leave')}
-            >
-              <CalendarPlus size={18} style={{ color: '#9333ea' }} />
-              <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>Leave Management</strong>
-              <span style={{ fontSize: '10.5px', color: '#64748b' }}>Apply & check status</span>
-            </button>
-
-            <button
-              type="button"
-              style={{
-                padding: '12px',
-                border: '1px solid #e2e8f0',
-                borderRadius: '8px',
-                background: '#fff',
-                textAlign: 'left',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '3px',
-                cursor: 'pointer',
-              }}
-              onClick={() => navigate('reports')}
-            >
-              <Activity size={18} style={{ color: '#0d9488' }} />
-              <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>Attendance Reports</strong>
-              <span style={{ fontSize: '10.5px', color: '#64748b' }}>Export attendance records</span>
-            </button>
-          </div>
-        </section>
-      </div>
+          )
+        })()}
+      </section>
 
       {/* Biometric Face Capture & GPS Verification Modal */}
       {activePunch && challenge && (

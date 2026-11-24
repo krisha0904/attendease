@@ -1356,6 +1356,21 @@ def _weekly_lecture_payload(lecture: models.WeeklyLecture) -> dict:
     day_idx = lecture.day_of_week
     day_name = WEEKDAY_NAMES[day_idx] if 0 <= day_idx < len(WEEKDAY_NAMES) else f"Day {day_idx}"
 
+    est_duration = "1 hr"
+    dur_minutes = 60
+    try:
+        st_obj = lecture.start_time
+        et_obj = lecture.end_time
+        if hasattr(st_obj, "hour") and hasattr(et_obj, "hour"):
+            m = (et_obj.hour * 60 + et_obj.minute) - (st_obj.hour * 60 + st_obj.minute)
+            if m > 0:
+                dur_minutes = m
+                h_val = m // 60
+                m_val = m % 60
+                est_duration = f"{h_val} hr {m_val} min" if h_val > 0 and m_val > 0 else (f"{h_val} hr" if h_val > 0 else f"{m_val} min")
+    except Exception:
+        pass
+
     return {
         "id": lecture.id,
         "user_id": lecture.user_id,
@@ -1383,6 +1398,8 @@ def _weekly_lecture_payload(lecture: models.WeeklyLecture) -> dict:
         "day_name": day_name,
         "start_time": lecture.start_time.strftime("%H:%M") if hasattr(lecture.start_time, "strftime") else str(lecture.start_time)[:5],
         "end_time": lecture.end_time.strftime("%H:%M") if hasattr(lecture.end_time, "strftime") else str(lecture.end_time)[:5],
+        "estimated_duration": est_duration,
+        "duration_minutes": dur_minutes,
         "status": lecture.status or "scheduled",
         "cancellation_reason": lecture.cancellation_reason,
         "substitute_faculty_id": lecture.substitute_faculty_id,
@@ -4344,6 +4361,11 @@ def create_app() -> FastAPI:
             win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
             punch_win_str = f"{win_start} – {win_end}"
 
+            dur_mins = int((et_dt - st_dt).total_seconds() // 60)
+            hrs = dur_mins // 60
+            rem_mins = dur_mins % 60
+            est_dur_str = f"{hrs} hr {rem_mins} min" if hrs > 0 and rem_mins > 0 else (f"{hrs} hr" if hrs > 0 else f"{rem_mins} min")
+
             today_items.append({
                 "lecture_number": idx + 1,
                 "source_type": "weekly",
@@ -4358,6 +4380,8 @@ def create_app() -> FastAPI:
                 "end_time": w.end_time.strftime("%I:%M %p"),
                 "raw_start_time": w.start_time.strftime("%H:%M"),
                 "raw_end_time": w.end_time.strftime("%H:%M"),
+                "estimated_duration": est_dur_str,
+                "duration_minutes": dur_mins,
                 "allowed_punch_in_window": punch_win_str,
                 "is_substitute": is_sub,
                 "status": item_status,
@@ -4394,6 +4418,11 @@ def create_app() -> FastAPI:
             win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
             punch_win_str = f"{win_start} – {win_end}"
 
+            dur_mins = int((et_dt - st_dt).total_seconds() // 60)
+            hrs = dur_mins // 60
+            rem_mins = dur_mins % 60
+            est_dur_str = f"{hrs} hr {rem_mins} min" if hrs > 0 and rem_mins > 0 else (f"{hrs} hr" if hrs > 0 else f"{rem_mins} min")
+
             today_items.append({
                 "lecture_number": len(weekly) + idx + 1,
                 "source_type": "additional",
@@ -4408,6 +4437,8 @@ def create_app() -> FastAPI:
                 "end_time": et.strftime("%I:%M %p"),
                 "raw_start_time": st.strftime("%H:%M"),
                 "raw_end_time": et.strftime("%H:%M"),
+                "estimated_duration": est_dur_str,
+                "duration_minutes": dur_mins,
                 "allowed_punch_in_window": punch_win_str,
                 "is_substitute": False,
                 "status": item_status,
@@ -4448,8 +4479,13 @@ def create_app() -> FastAPI:
             sem = getattr(w, "semester", None)
             div_title = f"Semester {sem}" if sem else "Section A"
             st_dt = datetime.combine(tomorrow, w.start_time)
+            et_dt = datetime.combine(tomorrow, w.end_time)
             win_start = (st_dt - timedelta(minutes=punch_in_win)).strftime("%I:%M %p")
             win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
+            dur_mins = int((et_dt - st_dt).total_seconds() // 60)
+            hrs = dur_mins // 60
+            rem_mins = dur_mins % 60
+            est_dur_str = f"{hrs} hr {rem_mins} min" if hrs > 0 and rem_mins > 0 else (f"{hrs} hr" if hrs > 0 else f"{rem_mins} min")
 
             tomorrow_items.append({
                 "lecture_number": idx + 1,
@@ -4465,6 +4501,8 @@ def create_app() -> FastAPI:
                 "end_time": w.end_time.strftime("%I:%M %p"),
                 "raw_start_time": w.start_time.strftime("%H:%M"),
                 "raw_end_time": w.end_time.strftime("%H:%M"),
+                "estimated_duration": est_dur_str,
+                "duration_minutes": dur_mins,
                 "allowed_punch_in_window": f"{win_start} – {win_end}",
                 "is_substitute": (w.substitute_faculty_id == user.id),
                 "status": "scheduled",
@@ -4477,8 +4515,13 @@ def create_app() -> FastAPI:
             st = datetime.strptime(a.start_time, "%H:%M").time() if isinstance(a.start_time, str) else a.start_time
             et = datetime.strptime(a.end_time, "%H:%M").time() if isinstance(a.end_time, str) else a.end_time
             st_dt = datetime.combine(tomorrow, st)
+            et_dt = datetime.combine(tomorrow, et)
             win_start = (st_dt - timedelta(minutes=punch_in_win)).strftime("%I:%M %p")
             win_end = (st_dt + timedelta(minutes=15)).strftime("%I:%M %p")
+            dur_mins = int((et_dt - st_dt).total_seconds() // 60)
+            hrs = dur_mins // 60
+            rem_mins = dur_mins % 60
+            est_dur_str = f"{hrs} hr {rem_mins} min" if hrs > 0 and rem_mins > 0 else (f"{hrs} hr" if hrs > 0 else f"{rem_mins} min")
             tomorrow_items.append({
                 "lecture_number": len(tomorrow_weekly) + idx + 1,
                 "source_type": "additional",
@@ -4493,6 +4536,8 @@ def create_app() -> FastAPI:
                 "end_time": et.strftime("%I:%M %p"),
                 "raw_start_time": st.strftime("%H:%M"),
                 "raw_end_time": et.strftime("%H:%M"),
+                "estimated_duration": est_dur_str,
+                "duration_minutes": dur_mins,
                 "allowed_punch_in_window": f"{win_start} – {win_end}",
                 "is_substitute": False,
                 "status": "scheduled",
@@ -4507,6 +4552,7 @@ def create_app() -> FastAPI:
 
         # 5. Weekly Schedule (Monday - Saturday)
         day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        week_start = today - timedelta(days=weekday)
         all_weekly_lectures = db.query(models.WeeklyLecture).filter(
             models.WeeklyLecture.college_id == user.college_id,
             models.WeeklyLecture.is_active.is_(True),
@@ -4515,23 +4561,72 @@ def create_app() -> FastAPI:
 
         weekly_schedule = []
         for d_idx, d_name in enumerate(day_names):
+            d_date = week_start + timedelta(days=d_idx)
             day_lecs = [w for w in all_weekly_lectures if w.day_of_week == d_idx]
+
+            # Query attendance records for that day to know actual status (completed, punched in, missed, scheduled)
+            day_records = db.query(models.LectureAttendanceRecord).filter(
+                models.LectureAttendanceRecord.college_id == user.college_id,
+                models.LectureAttendanceRecord.user_id == user.id,
+                models.LectureAttendanceRecord.lecture_date == d_date,
+            ).all()
+            rec_by_wid = {r.weekly_lecture_id: r for r in day_records if r.weekly_lecture_id}
+
+            formatted_lecs = []
+            for w in day_lecs:
+                st_comb = datetime.combine(d_date, w.start_time)
+                et_comb = datetime.combine(d_date, w.end_time)
+                dur_mins = int((et_comb - st_comb).total_seconds() // 60)
+                hrs = dur_mins // 60
+                rem_mins = dur_mins % 60
+                est_dur_str = f"{hrs} hr {rem_mins} min" if hrs > 0 and rem_mins > 0 else (f"{hrs} hr" if hrs > 0 else f"{rem_mins} min")
+
+                r = rec_by_wid.get(w.id)
+                if r and r.punch_out_time:
+                    status_text = "completed"
+                    status_label = "Completed"
+                elif r and r.punch_in_time:
+                    status_text = "in_progress"
+                    status_label = "Punched In"
+                elif d_date < today or (d_date == today and now > et_comb):
+                    status_text = "missed"
+                    status_label = "Missed"
+                elif d_date == today:
+                    if st_comb - timedelta(minutes=punch_in_win) <= now <= et_comb:
+                        status_text = "punch_in_available"
+                        status_label = "Punch In Available"
+                    else:
+                        status_text = "upcoming"
+                        status_label = "Upcoming"
+                else:
+                    status_text = "scheduled"
+                    status_label = "Scheduled"
+
+                formatted_lecs.append({
+                    "id": w.id,
+                    "subject": w.subject or (w.subject_rel.name if getattr(w, "subject_rel", None) else "Lecture"),
+                    "course_name": w.course_name or (w.course_rel.name if getattr(w, "course_rel", None) else "BCA"),
+                    "semester": getattr(w, "semester", None),
+                    "division": getattr(w, "division", "Section A") or "Section A",
+                    "room": w.room or (w.classroom.room_number if getattr(w, "classroom", None) else "LH-101"),
+                    "start_time": w.start_time.strftime("%I:%M %p"),
+                    "end_time": w.end_time.strftime("%I:%M %p"),
+                    "estimated_duration": est_dur_str,
+                    "duration_minutes": dur_mins,
+                    "status": status_text,
+                    "status_label": status_label,
+                    "punch_in_time": r.punch_in_time.strftime("%I:%M %p") if (r and r.punch_in_time) else None,
+                    "punch_out_time": r.punch_out_time.strftime("%I:%M %p") if (r and r.punch_out_time) else None,
+                })
+
             weekly_schedule.append({
                 "day_of_week": d_idx,
                 "day_name": d_name,
-                "lectures": [
-                    {
-                        "id": w.id,
-                        "subject": w.subject or (w.subject_rel.name if getattr(w, "subject_rel", None) else "Lecture"),
-                        "course_name": w.course_name or (w.course_rel.name if getattr(w, "course_rel", None) else "BCA"),
-                        "semester": getattr(w, "semester", None),
-                        "room": w.room or (w.classroom.room_number if getattr(w, "classroom", None) else None),
-                        "start_time": w.start_time.strftime("%I:%M %p"),
-                        "end_time": w.end_time.strftime("%I:%M %p"),
-                        "status": "active" if w.is_active else "inactive",
-                    }
-                    for w in day_lecs
-                ]
+                "date": d_date.strftime("%Y-%m-%d"),
+                "formatted_date": d_date.strftime("%b %d, %Y"),
+                "full_day_label": f"{d_name}, {d_date.strftime('%b %d')}",
+                "is_today": d_date == today,
+                "lectures": formatted_lecs,
             })
 
         # 6. Monthly & Weekly Metrics
@@ -4675,6 +4770,28 @@ def create_app() -> FastAPI:
         upcoming_cnt = sum(1 for x in today_items if x["status"] in ("upcoming", "scheduled", "in_progress", "punch_in_available"))
         missed_cnt = sum(1 for x in today_items if x["status"] == "missed")
 
+        # Calculate Weekly Total Lectures (Week-wise load)
+        week_start = today - timedelta(days=weekday)
+        week_end = week_start + timedelta(days=6)
+        weekly_scheduled_count = len(all_weekly_lectures)
+        week_addl_count = db.query(models.AdditionalLectureRequest).filter(
+            models.AdditionalLectureRequest.college_id == user.college_id,
+            models.AdditionalLectureRequest.user_id == user.id,
+            models.AdditionalLectureRequest.lecture_date >= week_start,
+            models.AdditionalLectureRequest.lecture_date <= week_end,
+            models.AdditionalLectureRequest.status == "approved",
+        ).count()
+        week_total_lectures = weekly_scheduled_count + week_addl_count
+
+        # Calculate Semester Lectures Progress (Lectures Taken / Total in Semester)
+        semester_delivered = db.query(models.LectureAttendanceRecord).filter(
+            models.LectureAttendanceRecord.college_id == user.college_id,
+            models.LectureAttendanceRecord.user_id == user.id,
+            models.LectureAttendanceRecord.punch_out_time.isnot(None),
+        ).count()
+        semester_target = max(60, weekly_scheduled_count * 15) if weekly_scheduled_count > 0 else 60
+        semester_pct = round((semester_delivered / semester_target * 100), 1) if semester_target > 0 else 0.0
+
         return {
             "faculty": {
                 "id": user.id,
@@ -4693,6 +4810,11 @@ def create_app() -> FastAPI:
                 "completed_lectures": completed_cnt,
                 "upcoming_lectures": upcoming_cnt,
                 "missed_lectures": missed_cnt,
+                "day_name": today.strftime("%A"),
+                "weekly_total_lectures": week_total_lectures,
+                "semester_completed_lectures": semester_delivered,
+                "semester_total_lectures": semester_target,
+                "semester_progress_pct": semester_pct,
                 "total_teaching_hours": round(month_taught_hours, 1),
                 "monthly_attendance_percentage": pct,
                 "late_arrivals": late_count,

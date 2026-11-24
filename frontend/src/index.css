@@ -2279,7 +2279,7 @@ textarea { resize: vertical; }
 }
 
 .faculty-timetable-table td {
-  padding: 12px 14px;
+  padding: 14px;
   border-bottom: 1px solid #f1f5f9;
   color: #334155;
   vertical-align: middle;
@@ -2287,6 +2287,153 @@ textarea { resize: vertical; }
 
 .faculty-timetable-table tr:hover td {
   background: #f8fafc;
+}
+
+/* Detailed Timetable Cards Layout */
+.detailed-timetable-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.detailed-timetable-card {
+  position: relative;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  transition: all 0.2s ease;
+  border-left: 4px solid #cbd5e1;
+}
+
+.detailed-timetable-card:hover {
+  border-color: #cbd5e1 #e2e8f0 #e2e8f0 #2563eb;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+}
+
+.detailed-card-completed { border-left-color: #16a34a !important; }
+.detailed-card-in_progress { border-left-color: #d97706 !important; background: #fffdfa; }
+.detailed-card-punch_in_available { border-left-color: #10b981 !important; background: #f0fdf4; }
+.detailed-card-upcoming { border-left-color: #3b82f6 !important; }
+.detailed-card-missed { border-left-color: #ef4444 !important; }
+.detailed-card-pending_review { border-left-color: #f59e0b !important; }
+
+.detailed-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.detailed-card-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.detailed-lec-num {
+  font-size: 11px;
+  font-weight: 800;
+  color: #1e3a8a;
+  background: #dbeafe;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: monospace;
+}
+
+.detailed-lec-subject {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.detailed-card-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  padding: 14px 0;
+}
+
+.detailed-card-meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.detailed-meta-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: #64748b;
+  letter-spacing: 0.4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.detailed-meta-value {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.detailed-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.detailed-weekly-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.detailed-weekly-col {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.detailed-weekly-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.detailed-weekly-col-title {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.detailed-weekly-item {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  padding: 12px 14px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  transition: all 0.15s ease;
+  border-left: 3px solid #2563eb;
+}
+
+.detailed-weekly-item:hover {
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.06);
 }
 
 .lecture-status-badge {
@@ -2377,4 +2524,321 @@ textarea { resize: vertical; }
   border-radius: 4px 4px 0 0;
   background: linear-gradient(180deg, #3b82f6, #1d4ed8);
   transition: height 0.3s ease;
+}
+
+/* ==========================================================
+   SPACIOUS UNCONGESTED TIMETABLE & LECTURE CARD STYLES
+   ========================================================== */
+.spacious-timetable-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.spacious-day-pills-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 4px 2px 10px;
+  scrollbar-width: thin;
+}
+
+.spacious-day-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 9px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.spacious-day-pill:hover {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #1e293b;
+}
+
+.spacious-day-pill.active {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.25);
+}
+
+.spacious-day-pill-count {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 800;
+  background: #f1f5f9;
+  color: #3b82f6;
+}
+
+.spacious-day-pill.active .spacious-day-pill-count {
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+
+.spacious-day-pill-today-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+}
+
+/* Day Group Header */
+.spacious-day-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.spacious-day-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+}
+
+.spacious-day-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spacious-day-header-title {
+  font-size: 13.5px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.spacious-day-header-date {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+}
+
+.spacious-day-today-tag {
+  font-size: 9.5px;
+  font-weight: 800;
+  background: #2563eb;
+  color: #ffffff;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+}
+
+.spacious-day-lec-count {
+  font-size: 11px;
+  font-weight: 700;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+/* Spacious Lecture Card (Horizontal Layout) */
+.spacious-lec-card {
+  display: grid;
+  grid-template-columns: 200px 1fr auto;
+  gap: 16px;
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 11px;
+  padding: 14px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+  transition: all 0.2s ease;
+  border-left: 4px solid #cbd5e1;
+}
+
+.spacious-lec-card:hover {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.05);
+  border-color: #cbd5e1;
+}
+
+/* Border accents by status */
+.spacious-lec-card.status-completed {
+  border-left-color: #16a34a;
+}
+.spacious-lec-card.status-in_progress {
+  border-left-color: #f59e0b;
+  background: #fffdfa;
+}
+.spacious-lec-card.status-punch_in_available {
+  border-left-color: #2563eb;
+  background: #f8fbff;
+}
+.spacious-lec-card.status-upcoming {
+  border-left-color: #3b82f6;
+}
+.spacious-lec-card.status-missed {
+  border-left-color: #ef4444;
+}
+
+/* Left: Time & Window Column */
+.spacious-lec-time-col {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.spacious-lec-time {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  font-weight: 800;
+  color: #1e3a8a;
+  letter-spacing: -0.2px;
+}
+
+.spacious-lec-time-icon {
+  color: #2563eb;
+  flex-shrink: 0;
+}
+
+.spacious-lec-duration-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #0369a1;
+  background: #e0f2fe;
+  padding: 2px 7px;
+  border-radius: 5px;
+  width: fit-content;
+}
+
+.spacious-lec-window {
+  font-size: 10px;
+  color: #64748b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  padding: 2px 6px;
+  border-radius: 4px;
+  width: fit-content;
+  margin-top: 2px;
+}
+
+/* Center: Subject & Metadata Column */
+.spacious-lec-main-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.spacious-lec-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spacious-lec-num {
+  font-size: 11px;
+  font-weight: 800;
+  font-family: monospace;
+  color: #2563eb;
+  background: #eff6ff;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.spacious-lec-subject {
+  font-size: 14.5px;
+  font-weight: 800;
+  color: #0f172a;
+  margin: 0;
+  line-height: 1.3;
+}
+
+.spacious-lec-tags-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spacious-lec-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  background: #f1f5f9;
+  padding: 2px 8px;
+  border-radius: 6px;
+}
+
+.spacious-lec-tag strong {
+  color: #0f172a;
+}
+
+.spacious-lec-punch-log {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #15803d;
+  background: #f0fdf4;
+  border: 1px solid #dcfce7;
+  padding: 3px 8px;
+  border-radius: 6px;
+  width: fit-content;
+  margin-top: 2px;
+}
+
+/* Right: Action & Status Column */
+.spacious-lec-action-col {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.spacious-punch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.spacious-punch-btn.punch-btn-out {
+  border-color: #f59e0b;
+  color: #b45309;
+}
+
+@media (max-width: 900px) {
+  .spacious-lec-card {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .spacious-lec-action-col {
+    align-items: flex-start;
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
 }

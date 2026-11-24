@@ -4,7 +4,7 @@ import {
   BookOpen, CalendarPlus, CircleHelp, Clock3, Fingerprint, FolderOpen, MapPin,
   KeyRound, LayoutDashboard, ListChecks, LogOut, Menu, Settings, ShieldCheck, UserRound, Users, X,
 } from 'lucide-react'
-import { api, clearTokens, errorMessage, fetchJson, getAccessToken, saveTokens } from './api'
+import { api, clearTokens, errorMessage, fetchJson, getAccessToken, getStoredUser, isUnauthorizedError, saveTokens, saveUser } from './api'
 import { useClock, useReloadable } from './hooks'
 import { AdminSidebar, AdminTopBar, ADMIN_NAV_GROUPS } from './AdminComponents'
 import { AdminViewDispatcher } from './AdminViewDispatcher'
@@ -66,9 +66,14 @@ type WeeklyLecture = {
   department: string | null
   subject: string
   course_name: string | null
+  semester?: number | null
   day_of_week: number
   start_time: string
   end_time: string
+  estimated_duration?: string
+  duration_minutes?: number
+  status?: string
+  status_label?: string
   room: string | null
   is_active: boolean
 }
@@ -312,6 +317,7 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
         return
       }
       saveTokens(data.access_token, data.refresh_token)
+      saveUser(signedInUser)
       onLogin(signedInUser)
     } catch (requestError) {
       setError(errorMessage(requestError))
@@ -332,6 +338,7 @@ function Login({ portal, onLogin }: { portal: Portal; onLogin: (user: User) => v
         return
       }
       saveTokens(data.access_token, data.refresh_token)
+      saveUser(signedInUser)
       onLogin(signedInUser)
     } catch (requestError) {
       setError(errorMessage(requestError))
@@ -1776,6 +1783,10 @@ function TimetablePage({ user }: { user: User }) {
   const [room, setRoom] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const [selectedDay, setSelectedDay] = useState<number>(() => {
+    const wd = (new Date().getDay() + 6) % 7
+    return wd < 6 ? wd : 0
+  })
   const { data: lectures, error: loadError, loading, reload } = useReloadable(
     () => fetchJson<WeeklyLecture[]>(manager ? '/admin/timetable' : '/timetable/mine'),
     `timetable:${user.id}:${manager}`,
@@ -1843,25 +1854,165 @@ function TimetablePage({ user }: { user: User }) {
           <div className="full-field"><button className="button button-primary" disabled={busy || teachers.length === 0}>{busy ? 'Saving…' : 'Add to timetable'} <ChevronRight size={15} /></button></div>
         </form>
       </section>}
-      {loading ? <Loading /> : <div className="timetable-week">
-        {weekdayNames.map((day, dayIndex) => {
-          const rawList: any = lectures
-          const lectureList: WeeklyLecture[] = Array.isArray(rawList) ? rawList : rawList?.items || []
+      {!manager && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px' }}>
+            <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>Total Weekly Lectures</span>
+            <div style={{ fontSize: '22px', fontWeight: 800, color: '#1e3a8a', marginTop: '2px' }}>
+              {Array.isArray(lectures) ? lectures.length : (lectures as any)?.items?.length || 0}
+            </div>
+            <span style={{ fontSize: '10.5px', color: '#64748b' }}>Mon – Sat recurring load</span>
+          </div>
+
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px' }}>
+            <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>Active Teaching Days</span>
+            <div style={{ fontSize: '22px', fontWeight: 800, color: '#15803d', marginTop: '2px' }}>
+              {new Set((Array.isArray(lectures) ? lectures : []).map((l: any) => l.day_of_week)).size} days
+            </div>
+            <span style={{ fontSize: '10.5px', color: '#64748b' }}>Scheduled this semester</span>
+          </div>
+
+          <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px' }}>
+            <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 600 }}>Designation</span>
+            <div style={{ fontSize: '16px', fontWeight: 800, color: '#1e293b', marginTop: '4px' }}>
+              {user.designation || 'Visiting Faculty'}
+            </div>
+            <span style={{ fontSize: '10.5px', color: '#64748b' }}>{user.college_name || 'AttendEase Campus'}</span>
+          </div>
+        </div>
+      )}
+
+      {loading ? <Loading /> : (() => {
+        const now = new Date()
+        const currentWeekday = (now.getDay() + 6) % 7 // Monday = 0, ..., Sunday = 6
+        const mondayDate = new Date(now)
+        mondayDate.setDate(now.getDate() - currentWeekday)
+
+        const rawList: any = lectures
+        const lectureList: WeeklyLecture[] = Array.isArray(rawList) ? rawList : rawList?.items || []
+
+        const days = weekdayNames.slice(0, 6).map((day, dayIndex) => {
           const dayLectures = lectureList.filter((lecture) => lecture.day_of_week === dayIndex)
-          return (
-            <section className={`panel timetable-day ${dayLectures.length ? '' : 'timetable-day-empty'}`} key={day}>
-              <div className="timetable-day-heading"><strong>{day}</strong><span>{dayLectures.length} lecture{dayLectures.length === 1 ? '' : 's'}</span></div>
-              {dayLectures.length ? <div className="timetable-day-list">{dayLectures.map((lecture) => (
-                <article className="timetable-entry" key={lecture.id}>
-                  <div className="timetable-entry-time">{lecture.start_time} – {lecture.end_time}</div>
-                  <div className="timetable-entry-copy"><strong>{lecture.subject}</strong><span>{[lecture.course_name, lecture.department, lecture.room ? `Room: ${lecture.room}` : null, manager ? lecture.user_name : null].filter(Boolean).join(' · ') || 'Lecture'}</span></div>
-                  {manager && <button className="button button-link button-compact" disabled={busy} onClick={() => void removeLecture(lecture.id)}>Remove</button>}
-                </article>
-              ))}</div> : <p className="muted">No lectures scheduled</p>}
-            </section>
-          )
-        })}
-      </div>}
+          const dDate = new Date(mondayDate)
+          dDate.setDate(mondayDate.getDate() + dayIndex)
+          const formattedDate = dDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+          const isToday = dayIndex === currentWeekday
+          return { day, dayIndex, dayLectures, formattedDate, isToday }
+        })
+
+        const currentSelected = days.find((d) => d.dayIndex === selectedDay) || days[0]
+
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* Day-Wise Selector Pills (Mon - Sat) */}
+            <div className="spacious-day-pills-bar">
+              {days.map((d) => (
+                <button
+                  key={d.dayIndex}
+                  type="button"
+                  className={`spacious-day-pill ${selectedDay === d.dayIndex ? 'active' : ''}`}
+                  onClick={() => setSelectedDay(d.dayIndex)}
+                >
+                  {d.isToday && <span className="spacious-day-pill-today-dot" title="Today" />}
+                  <span>{d.day.slice(0, 3)} {d.formattedDate.replace(/^[A-Za-z]+\s*/, '')}</span>
+                  <span className="spacious-day-pill-count">{d.dayLectures.length}</span>
+                </button>
+              ))}
+            </div>
+
+            {/* Selected Day Spacious Uncongested Schedule */}
+            {currentSelected && (
+              <section
+                key={currentSelected.dayIndex}
+                className="spacious-day-section"
+                style={{ marginTop: '4px' }}
+              >
+                <div className="spacious-day-header" style={currentSelected.isToday ? { borderLeft: '3px solid #2563eb', background: '#eff6ff' } : {}}>
+                  <div className="spacious-day-header-left">
+                    <CalendarDays size={16} style={{ color: currentSelected.isToday ? '#2563eb' : '#64748b' }} />
+                    <span className="spacious-day-header-title">{currentSelected.day}</span>
+                    <span className="spacious-day-header-date">{currentSelected.formattedDate}</span>
+                    {currentSelected.isToday && (
+                      <span className="spacious-day-today-tag">TODAY</span>
+                    )}
+                  </div>
+                  <span className="spacious-day-lec-count">
+                    {currentSelected.dayLectures.length} lecture{currentSelected.dayLectures.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+
+                {currentSelected.dayLectures.length ? (
+                  <div className="spacious-timetable-container" style={{ marginTop: '8px' }}>
+                    {currentSelected.dayLectures.map((lecture) => (
+                      <article
+                        className={`spacious-lec-card status-${lecture.status || 'scheduled'}`}
+                        key={lecture.id}
+                      >
+                        {/* Time & Duration */}
+                        <div className="spacious-lec-time-col">
+                          <div className="spacious-lec-time">
+                            <Clock3 size={15} className="spacious-lec-time-icon" />
+                            <span>{lecture.start_time} – {lecture.end_time}</span>
+                          </div>
+                          <div className="spacious-lec-duration-pill">
+                            <span>⏱ {lecture.estimated_duration || '1 hr'}</span>
+                          </div>
+                        </div>
+
+                        {/* Subject & Info */}
+                        <div className="spacious-lec-main-col">
+                          <div className="spacious-lec-title-row">
+                            <h4 className="spacious-lec-subject">{lecture.subject}</h4>
+                          </div>
+
+                          <div className="spacious-lec-tags-row">
+                            <span className="spacious-lec-tag">
+                              <BookOpen size={13} style={{ color: '#2563eb' }} />
+                              <strong>{lecture.course_name || 'BCA'}</strong> {lecture.semester ? `(Sem ${lecture.semester})` : ''}
+                            </span>
+
+                            <span className="spacious-lec-tag">
+                              <MapPin size={13} style={{ color: '#0d9488' }} />
+                              <span>Room {lecture.room || 'LH-101'}</span>
+                            </span>
+
+                            {lecture.department && (
+                              <span className="spacious-lec-tag">
+                                <span>{lecture.department}</span>
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Status & Actions */}
+                        <div className="spacious-lec-action-col">
+                          <span className={`lecture-status-badge status-${lecture.status || 'scheduled'}`}>
+                            {lecture.status_label || (lecture.status || 'scheduled').replace('_', ' ').toUpperCase()}
+                          </span>
+
+                          {manager && (
+                            <button
+                              className="button button-link button-compact"
+                              disabled={busy}
+                              onClick={() => void removeLecture(lecture.id)}
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ textAlign: 'center', padding: '24px 0', color: '#64748b', fontSize: '13px', background: '#f8fafc', borderRadius: '10px', border: '1px dashed #cbd5e1', margin: '6px 0 12px' }}>
+                    No lectures scheduled for {currentSelected.day} ({currentSelected.formattedDate})
+                  </div>
+                )}
+              </section>
+            )}
+          </div>
+        )
+      })()}
     </div>
   )
 }
@@ -2073,15 +2224,18 @@ function EmptyState({ icon: Icon, title, detail }: { icon: typeof Bell; title: s
 
 function App() {
   const requestedPortal = portalFromPath(window.location.pathname)
-  const [user, setUser] = useState<User | null>(null)
-  const [page, setPage] = useState('dashboard')
+  const [user, setUser] = useState<User | null>(() => getStoredUser<User>())
+  const [page, setPage] = useState(() => localStorage.getItem('attendease_current_page') || 'dashboard')
   const [pageMessage, setPageMessage] = useState('')
-  const [checking, setChecking] = useState(Boolean(getAccessToken()))
+  const [checking, setChecking] = useState(() => !getStoredUser() && Boolean(getAccessToken()))
   const [mobileMenu, setMobileMenu] = useState(false)
   const [logoutError, setLogoutError] = useState('')
 
   useEffect(() => {
-    if (!getAccessToken()) return
+    if (!getAccessToken()) {
+      setChecking(false)
+      return
+    }
     api.get<User>('/auth/me')
       .then(({ data }) => {
         const correctPortal = portalForRole(data.role)
@@ -2092,14 +2246,25 @@ function App() {
           }
         }
         setUser(data)
+        saveUser(data)
         if (data.face_enrollment_status === 'not_enrolled') setPage('enrollment')
       })
-      .catch(() => clearTokens())
+      .catch((err: unknown) => {
+        // Only clear session if explicitly unauthorized (401)
+        // Transient network issues or dev server reloads keep current state
+        if (isUnauthorizedError(err)) {
+          clearTokens()
+          setUser(null)
+        }
+      })
       .finally(() => setChecking(false))
   }, [requestedPortal])
 
   useEffect(() => {
-    const logout = () => setUser(null)
+    const logout = () => {
+      setUser(null)
+      clearTokens()
+    }
     window.addEventListener('attendease:logout', logout)
     return () => window.removeEventListener('attendease:logout', logout)
   }, [])
@@ -2108,11 +2273,14 @@ function App() {
 
   function acceptUser(nextUser: User) {
     setUser(nextUser)
-    setPage(nextUser.face_enrollment_status === 'not_enrolled' ? 'enrollment' : 'dashboard')
+    saveUser(nextUser)
+    const savedPage = localStorage.getItem('attendease_current_page') || 'dashboard'
+    setPage(nextUser.face_enrollment_status === 'not_enrolled' ? 'enrollment' : savedPage)
   }
 
   function completeEnrollment() {
-    setPage('dashboard')
+    const savedPage = localStorage.getItem('attendease_current_page') || 'dashboard'
+    setPage(savedPage === 'enrollment' ? 'dashboard' : savedPage)
     setPageMessage('Your face has been successfully registered! It is pending administrator approval for face-verified attendance.')
   }
 
@@ -2124,6 +2292,7 @@ function App() {
       setLogoutError(errorMessage(error))
     } finally {
       clearTokens()
+      localStorage.removeItem('attendease_current_page')
       setUser(null)
       setPageMessage('')
     }
@@ -2136,6 +2305,7 @@ function App() {
       return
     }
     setPage(key)
+    localStorage.setItem('attendease_current_page', key)
     setPageMessage('')
     setMobileMenu(false)
   }
